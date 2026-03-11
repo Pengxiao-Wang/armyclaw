@@ -60,9 +60,11 @@ const mockTask: Task = {
   reject_count_strategic: 0,
   rubric: null,
   artifacts_path: null,
+  error_count: 0,
   override_skip_gate: 0,
   source_channel: null,
   source_chat_id: null,
+  context_chain: null,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
 };

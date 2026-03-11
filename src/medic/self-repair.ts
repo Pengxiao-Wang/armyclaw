@@ -4,22 +4,26 @@
 // ═══════════════════════════════════════════════════════════
 
 import { STALL_THRESHOLD_MS, CONSECUTIVE_FAILURE_THRESHOLD } from '../config.js';
-import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTaskState, writeFlowLog } from '../db.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, updateTaskState, writeFlowLog } from '../db.js';
+import { QueuePriority } from '../herald/queue.js';
 import { logger } from '../logger.js';
 import type { AgentRun, RecoveryAction, TaskState } from '../types.js';
 
 export class Medic {
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private enqueue: ((taskId: string, priority: QueuePriority) => void) | null = null;
 
   /**
    * Start periodic scanning for stuck tasks.
+   * @param enqueue — callback to re-enqueue recovered tasks into the processing queue
    */
-  start(intervalMs: number = 10_000): void {
+  start(intervalMs: number = 10_000, enqueue?: (taskId: string, priority: QueuePriority) => void): void {
     if (this.intervalId) {
       logger.warn('Medic is already running');
       return;
     }
 
+    this.enqueue = enqueue ?? null;
     logger.info({ intervalMs }, 'Medic started — scanning for stuck tasks');
 
     this.intervalId = setInterval(() => {
@@ -118,31 +122,35 @@ export class Medic {
 
     switch (action) {
       case 'retry':
-        // Transition task back to its entry point for the current phase
+        // Reset error count and re-enqueue for another attempt
         logger.info({ taskId }, 'Recovery: retrying task');
+        updateTask(taskId, { error_count: 0 });
         writeFlowLog({
           task_id: taskId,
           at: now,
           from_state: task.state,
           to_state: task.state,
           agent_role: task.assigned_agent,
-          reason: 'medic: retry — restarting current phase',
+          reason: 'medic: retry — resetting error count and re-enqueueing',
           duration_ms: null,
         });
+        this.enqueue?.(taskId, QueuePriority.NEW_TASK);
         break;
 
       case 'reassign':
-        // Assign a different engineer and retry
+        // Reset error count, clear engineer assignment, and re-enqueue
         logger.info({ taskId }, 'Recovery: reassigning task to different engineer');
+        updateTask(taskId, { error_count: 0, assigned_engineer_id: null });
         writeFlowLog({
           task_id: taskId,
           at: now,
           from_state: task.state,
           to_state: task.state,
           agent_role: task.assigned_agent,
-          reason: 'medic: reassign — switching engineer',
+          reason: 'medic: reassign — switching engineer, resetting errors',
           duration_ms: null,
         });
+        this.enqueue?.(taskId, QueuePriority.NEW_TASK);
         break;
 
       case 'escalate':

@@ -83,6 +83,7 @@ export interface Task {
   reject_count_strategic: number;
   rubric: string | null; // JSON string[]
   artifacts_path: string | null;
+  error_count: number;
   override_skip_gate: number; // 0 or 1 (SQLite boolean)
   source_channel: string | null;
   source_chat_id: string | null;
@@ -215,6 +216,7 @@ export interface Channel {
   sendMessage(chatId: string, text: string): Promise<void>;
   isConnected(): boolean;
   disconnect(): Promise<void>;
+  setInboundHandler?(handler: OnInboundMessage): void;
 }
 
 export interface InboundMessage {

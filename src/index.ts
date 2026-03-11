@@ -11,6 +11,7 @@ import {
   getTaskById,
   getTasksByParent,
   updateTask,
+  updateTaskState,
   appendContextChain,
 } from './db.js';
 import { ChannelRegistry } from './channels/registry.js';
@@ -28,6 +29,7 @@ import { CredentialProxy } from './arsenal/credential-proxy.js';
 import { LLMClient } from './arsenal/llm-client.js';
 import { Medic } from './medic/self-repair.js';
 import { CostTracker } from './depot/cost-tracker.js';
+import { MAX_TASK_ERRORS } from './config.js';
 import { TaskQueue, QueuePriority } from './herald/queue.js';
 import { routeTask, shouldSkipPlanning } from './herald/router.js';
 import { transition, routeReject } from './herald/state-machine.js';
@@ -59,6 +61,7 @@ export class HQ {
   private templates: TaskTemplate[] = [];
   private running = false;
   private loopTimer: NodeJS.Timeout | null = null;
+  private pendingRetries: { taskId: string; readyAt: number; priority: QueuePriority }[] = [];
 
   constructor() {
     this.runner = new AgentRunner(this.llm, this.costTracker);
@@ -72,8 +75,8 @@ export class HQ {
     this.credentials.loadFromEnv();
     logger.info({ providers: this.credentials.getLoadedProviders() }, 'Credential proxy loaded');
 
-    // Start medic (stuck-task recovery)
-    this.medic.start();
+    // Start medic (stuck-task recovery) — pass enqueue callback so medic can re-queue recovered tasks
+    this.medic.start(10_000, (taskId, priority) => this.queue.enqueue(taskId, priority));
 
     // Register channels
     this.channels.register(new LarkChannel());
@@ -142,6 +145,9 @@ export class HQ {
     const processBatch = async () => {
       if (!this.running) return;
 
+      // Flush pending retries whose backoff has expired
+      this.flushPendingRetries();
+
       // Dequeue up to maxConcurrent tasks (queue.dequeue respects the limit)
       const taskPromises: Promise<void>[] = [];
 
@@ -151,18 +157,32 @@ export class HQ {
 
         taskPromises.push(
           (async () => {
+            let hadError = false;
             try {
               const task = getTaskById(taskId);
               if (task) {
                 await this.processTask(task);
               }
             } catch (err) {
+              hadError = true;
+              // Error handling is done inside processTask's catch block.
+              // This outer catch is a safety net for unexpected errors.
               logger.error(
                 { taskId, error: err instanceof Error ? err.message : String(err) },
-                'Task processing failed',
+                'Task processing failed (outer)',
               );
             } finally {
+              // Must complete before re-enqueue — enqueue() skips active tasks
               this.queue.complete(taskId);
+
+              // Only re-enqueue on success. On error, processTask handles retry scheduling.
+              if (!hadError) {
+                const updated = getTaskById(taskId);
+                const terminal: string[] = [TS.DONE, TS.FAILED, TS.CANCELLED, TS.PAUSED, TS.EXECUTING];
+                if (updated && !terminal.includes(updated.state)) {
+                  this.queue.enqueue(taskId, QueuePriority.NEW_TASK);
+                }
+              }
             }
           })(),
         );
@@ -179,6 +199,33 @@ export class HQ {
     };
 
     processBatch();
+  }
+
+  /**
+   * Flush pending retries whose backoff timer has expired.
+   * Tasks are re-enqueued for processing; stale entries (terminal tasks) are discarded.
+   */
+  private flushPendingRetries(): void {
+    if (this.pendingRetries.length === 0) return;
+    const now = Date.now();
+    const terminal = new Set<string>([TS.DONE, TS.FAILED, TS.CANCELLED]);
+    this.pendingRetries = this.pendingRetries.filter((r) => {
+      if (now >= r.readyAt) {
+        const task = getTaskById(r.taskId);
+        if (task && !terminal.has(task.state)) {
+          this.queue.enqueue(r.taskId, r.priority);
+        }
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Schedule a task retry with exponential backoff.
+   */
+  private scheduleRetry(taskId: string, delayMs: number, priority: QueuePriority): void {
+    this.pendingRetries.push({ taskId, readyAt: Date.now() + delayMs, priority });
   }
 
   /**
@@ -238,12 +285,39 @@ export class HQ {
           await this.handleDelivery(task, rawOutput);
           break;
       }
+
+      // Success — reset error count so transient failures don't accumulate across phases
+      if (task.error_count > 0) {
+        updateTask(task.id, { error_count: 0 });
+      }
     } catch (err) {
-      logger.error(
-        { taskId: task.id, role, error: err instanceof Error ? err.message : String(err) },
-        'Agent execution failed',
-      );
-      // Don't transition to FAILED on first error — let medic handle retries
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const newErrorCount = (task.error_count ?? 0) + 1;
+      updateTask(task.id, { error_count: newErrorCount });
+
+      if (newErrorCount >= MAX_TASK_ERRORS) {
+        // Max errors exceeded — force-fail (bypass state machine validation)
+        logger.error(
+          { taskId: task.id, errorCount: newErrorCount, error: errorMsg },
+          'Task failed — max consecutive errors exceeded',
+        );
+        updateTaskState(task.id, TS.FAILED as TaskState, role,
+          `Failed after ${newErrorCount} consecutive errors: ${errorMsg}`);
+        this.replyToSource(task, `[Task Failed] ${task.id}: ${errorMsg}`).catch(() => {});
+        if (task.parent_id) {
+          this.checkSubtaskCompletion(task.parent_id);
+        }
+      } else {
+        // Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 60s)
+        const backoffMs = Math.min(2000 * Math.pow(2, newErrorCount - 1), 60_000);
+        logger.warn(
+          { taskId: task.id, role, errorCount: newErrorCount, nextRetryMs: backoffMs, error: errorMsg },
+          'Agent error — scheduled retry with backoff',
+        );
+        this.scheduleRetry(task.id, backoffMs, QueuePriority.NEW_TASK);
+      }
+      // Re-throw so the outer finally knows this was an error (hadError flag)
+      throw err;
     }
   }
 
@@ -355,7 +429,12 @@ export class HQ {
 
     if (output.verdict === 'approve') {
       if (task.state === TS.GATE1_REVIEW) {
-        transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
+        // ANSWER type already replied — skip dispatching, go straight to delivery
+        if (task.intent_type === IntentType.ANSWER) {
+          transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 1 approved (direct answer)');
+        } else {
+          transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
+        }
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
       } else if (task.state === TS.GATE2_REVIEW) {
         transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 2 approved');
@@ -414,9 +493,17 @@ export class HQ {
     } else if (output.status === 'failed') {
       transition(task.id, TS.FAILED, AR.ENGINEER, `Execution failed: ${output.result}`);
     } else if (output.status === 'blocked') {
-      // Re-enqueue with lower priority, will be picked up after dependencies resolve
-      logger.warn({ taskId: task.id, reason: output.result }, 'Engineer blocked');
-      this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
+      const newErrorCount = (task.error_count ?? 0) + 1;
+      updateTask(task.id, { error_count: newErrorCount });
+
+      if (newErrorCount >= MAX_TASK_ERRORS) {
+        logger.error({ taskId: task.id, blockedCount: newErrorCount }, 'Engineer blocked too many times — failing');
+        transition(task.id, TS.FAILED, AR.ENGINEER, `Blocked ${newErrorCount} times: ${output.result}`);
+      } else {
+        const backoffMs = Math.min(5000 * Math.pow(2, newErrorCount - 1), 120_000);
+        logger.warn({ taskId: task.id, reason: output.result, attempt: newErrorCount, nextRetryMs: backoffMs }, 'Engineer blocked — backing off');
+        this.scheduleRetry(task.id, backoffMs, QueuePriority.EXECUTING);
+      }
     }
   }
 

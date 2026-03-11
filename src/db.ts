@@ -36,6 +36,7 @@ function createSchema(database: Database.Database): void {
       reject_count_strategic INTEGER NOT NULL DEFAULT 0,
       rubric TEXT,
       artifacts_path TEXT,
+      error_count INTEGER NOT NULL DEFAULT 0,
       override_skip_gate INTEGER NOT NULL DEFAULT 0,
       source_channel TEXT,
       source_chat_id TEXT,
@@ -129,6 +130,15 @@ export function initDatabase(): void {
   db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
   createSchema(db);
+
+  // Migration: add error_count column for existing databases
+  try {
+    db.prepare('SELECT error_count FROM tasks LIMIT 0').raw().get();
+  } catch {
+    db.exec('ALTER TABLE tasks ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0');
+    logger.info('Migration: added error_count column to tasks');
+  }
+
   logger.info({ path: DB_PATH }, 'Database initialized (WAL mode)');
 }
 
@@ -141,10 +151,11 @@ export function _initTestDatabase(): void {
 // ─── Tasks ──────────────────────────────────────────────────────
 
 export function createTask(
-  task: Omit<Task, 'created_at' | 'updated_at' | 'context_chain'> & {
+  task: Omit<Task, 'created_at' | 'updated_at' | 'context_chain' | 'error_count'> & {
     created_at?: string;
     updated_at?: string;
     context_chain?: string | null;
+    error_count?: number;
   },
 ): Task {
   const now = new Date().toISOString();
@@ -162,6 +173,7 @@ export function createTask(
     reject_count_strategic: task.reject_count_strategic ?? 0,
     rubric: task.rubric ?? null,
     artifacts_path: task.artifacts_path ?? null,
+    error_count: task.error_count ?? 0,
     override_skip_gate: task.override_skip_gate ?? 0,
     source_channel: task.source_channel ?? null,
     source_chat_id: task.source_chat_id ?? null,
@@ -172,13 +184,13 @@ export function createTask(
 
   const insertTaskTxn = db.transaction(() => {
     db.prepare(`
-      INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, override_skip_gate, source_channel, source_chat_id, context_chain, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, error_count, override_skip_gate, source_channel, source_chat_id, context_chain, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id, row.parent_id, row.campaign_id, row.state, row.description, row.priority,
       row.assigned_agent, row.assigned_engineer_id, row.intent_type,
       row.reject_count_tactical, row.reject_count_strategic,
-      row.rubric, row.artifacts_path, row.override_skip_gate,
+      row.rubric, row.artifacts_path, row.error_count, row.override_skip_gate,
       row.source_channel, row.source_chat_id, row.context_chain,
       row.created_at, row.updated_at,
     );
@@ -251,7 +263,7 @@ const TASK_UPDATE_FIELDS = new Set([
   'parent_id', 'campaign_id', 'state', 'description', 'priority',
   'assigned_agent', 'assigned_engineer_id', 'intent_type',
   'reject_count_tactical', 'reject_count_strategic',
-  'rubric', 'artifacts_path', 'override_skip_gate',
+  'rubric', 'artifacts_path', 'error_count', 'override_skip_gate',
   'source_channel', 'source_chat_id', 'context_chain',
 ]);
 

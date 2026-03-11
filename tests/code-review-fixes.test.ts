@@ -47,6 +47,7 @@ function makeTestTask(overrides: Record<string, unknown> = {}) {
     reject_count_strategic: 0,
     rubric: null,
     artifacts_path: null,
+    error_count: 0,
     override_skip_gate: 0,
     source_channel: null,
     source_chat_id: null,
