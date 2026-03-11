@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 // Mock DB functions
 vi.mock('../src/db.js', () => ({
   getActiveRuns: vi.fn(() => []),
+  getRecentRunsForTask: vi.fn(() => []),
   getTaskById: vi.fn(),
   updateTaskState: vi.fn(),
   writeFlowLog: vi.fn(),
@@ -18,7 +19,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 import { Medic } from '../src/medic/self-repair.js';
-import { getActiveRuns, getTaskById, updateTaskState, writeFlowLog } from '../src/db.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTaskState, writeFlowLog } from '../src/db.js';
 import type { AgentRun, Task } from '../src/types.js';
 
 function makeRun(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -80,9 +81,9 @@ describe('Medic', () => {
   describe('stall detection', () => {
     it('detects stalled tasks (updated_at > STALL_THRESHOLD_MS ago)', async () => {
       const stalledTime = new Date(Date.now() - 300_000).toISOString(); // 5 min ago
-      vi.mocked(getActiveRuns).mockReturnValue([
-        makeRun({ updated_at: stalledTime }),
-      ]);
+      const stalledRun = makeRun({ updated_at: stalledTime });
+      vi.mocked(getActiveRuns).mockReturnValue([stalledRun]);
+      vi.mocked(getRecentRunsForTask).mockReturnValue([stalledRun]);
       vi.mocked(getTaskById).mockReturnValue(makeTask());
 
       await medic.scan();
@@ -192,18 +193,26 @@ describe('Medic', () => {
 
   describe('scan with consecutive failures', () => {
     it('triggers recovery when 5+ consecutive errors detected', async () => {
-      const stalledTime = new Date(Date.now() - 300_000).toISOString();
+      // Active run: currently running (this is what getActiveRuns returns)
+      const activeRun = makeRun({
+        id: 6,
+        status: 'running',
+        updated_at: new Date().toISOString(), // not stalled
+      });
+
+      // Historical runs: 5 consecutive errors (returned by getRecentRunsForTask)
       const errorRuns: AgentRun[] = Array.from({ length: 5 }, (_, i) =>
         makeRun({
           id: i + 1,
           status: 'error',
           error: 'test error',
           started_at: new Date(Date.now() - (5 - i) * 1000).toISOString(),
-          updated_at: stalledTime,
+          updated_at: new Date(Date.now() - (5 - i) * 1000).toISOString(),
         }),
       );
 
-      vi.mocked(getActiveRuns).mockReturnValue(errorRuns);
+      vi.mocked(getActiveRuns).mockReturnValue([activeRun]);
+      vi.mocked(getRecentRunsForTask).mockReturnValue([activeRun, ...errorRuns]);
       vi.mocked(getTaskById).mockReturnValue(makeTask());
 
       await medic.scan();

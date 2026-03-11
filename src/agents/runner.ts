@@ -174,13 +174,14 @@ export class AgentRunner {
         totalInputTokens += response.input_tokens;
         totalOutputTokens += response.output_tokens;
 
+        // Always capture content (LLM may return text alongside tool_use)
+        finalContent = response.content || finalContent;
+
         // Keep medic happy — update agent_run timestamp
         updateAgentRun(runId, { updated_at: new Date().toISOString() });
 
         // No tool calls → agent is done
         if (response.stop_reason !== 'tool_use' || !response.tool_use || response.tool_use.length === 0) {
-          finalContent = response.content;
-
           writeProgressLog({
             task_id: task.id,
             at: new Date().toISOString(),
@@ -188,7 +189,31 @@ export class AgentRunner {
             text: `Agent ${role} finished after ${turn + 1} turn(s)`,
             todos: null,
           });
-          break;
+
+          // Record success and return directly from the loop
+          const finishedAt = new Date().toISOString();
+          updateAgentRun(runId, {
+            status: 'success',
+            finished_at: finishedAt,
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            error: null,
+          });
+
+          logger.info(
+            { taskId: task.id, role, runId, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+            'Agent run completed (agentic)',
+          );
+
+          writeProgressLog({
+            task_id: task.id,
+            at: finishedAt,
+            agent: role,
+            text: `Agent ${role} completed (${totalInputTokens}+${totalOutputTokens} tokens total)`,
+            todos: null,
+          });
+
+          return finalContent;
         }
 
         // Tool calls requested — execute them
@@ -226,33 +251,15 @@ export class AgentRunner {
         messages.push({ role: 'user', content: toolResults });
       }
 
-      // Record success with cumulative token counts
-      const finishedAt = new Date().toISOString();
-      updateAgentRun(runId, {
-        status: 'success',
-        finished_at: finishedAt,
-        input_tokens: totalInputTokens,
-        output_tokens: totalOutputTokens,
-        error: null,
-      });
-
-      logger.info(
-        { taskId: task.id, role, runId, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
-        'Agent run completed (agentic)',
-      );
-
-      writeProgressLog({
-        task_id: task.id,
-        at: finishedAt,
-        agent: role,
-        text: `Agent ${role} completed (${totalInputTokens}+${totalOutputTokens} tokens total)`,
-        todos: null,
-      });
-
-      return finalContent;
+      // Only reached when MAX_AGENT_TURNS exhausted → error
+      this.recordError(task, role, runId, new Error('max_turns_exhausted'));
+      throw new Error(`Agent ${role} exhausted ${MAX_AGENT_TURNS} turns`);
 
     } catch (err) {
-      this.recordError(task, role, runId, err);
+      // Avoid double-recording if we already recorded the max_turns error above
+      if (!(err instanceof Error && err.message.includes('exhausted'))) {
+        this.recordError(task, role, runId, err);
+      }
       throw err;
     }
   }
@@ -374,6 +381,22 @@ export class AgentRunner {
     } else {
       const defaultPath = path.join(TASKS_DIR, task.id);
       sections.push(`## Working Directory\nPath: ${defaultPath}`);
+    }
+
+    if (task.context_chain) {
+      try {
+        const chain = JSON.parse(task.context_chain) as { role: string; output: string }[];
+        if (chain.length > 0) {
+          sections.push([
+            '## Upstream Agent Outputs',
+            ...chain.map((entry) =>
+              `### ${entry.role}\n${entry.output.slice(0, 2000)}`,
+            ),
+          ].join('\n\n'));
+        }
+      } catch {
+        // Invalid context_chain JSON
+      }
     }
 
     const toolNames = getToolsForRole(role);

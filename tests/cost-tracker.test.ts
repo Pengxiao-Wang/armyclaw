@@ -105,6 +105,38 @@ describe('CostTracker', () => {
     });
   });
 
+  describe('pre-flight budget check', () => {
+    it('blocks LLM call when budget is already exceeded', async () => {
+      vi.mocked(getDailyCost).mockReturnValue(50); // at limit
+      const llmCall = vi.fn();
+
+      await expect(
+        tracker.trackCall('task-1', 'engineer' as AgentRole, llmCall),
+      ).rejects.toThrow('Daily budget exceeded');
+
+      // LLM call should NOT have been invoked
+      expect(llmCall).not.toHaveBeenCalled();
+      expect(recordCost).not.toHaveBeenCalled();
+    });
+
+    it('allows LLM call when under budget', async () => {
+      vi.mocked(getDailyCost).mockReturnValue(10); // under budget
+      const mockResponse: LLMResponse = {
+        content: 'ok',
+        input_tokens: 100,
+        output_tokens: 50,
+        model: 'claude-sonnet-4-20250514',
+        stop_reason: 'end_turn',
+      };
+      const llmCall = vi.fn().mockResolvedValue(mockResponse);
+
+      const result = await tracker.trackCall('task-1', 'engineer' as AgentRole, llmCall);
+
+      expect(result).toEqual(mockResponse);
+      expect(llmCall).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('budget checking', () => {
     it('returns false when under budget', () => {
       vi.mocked(getDailyCost).mockReturnValue(10);

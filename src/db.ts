@@ -39,6 +39,7 @@ function createSchema(database: Database.Database): void {
       override_skip_gate INTEGER NOT NULL DEFAULT 0,
       source_channel TEXT,
       source_chat_id TEXT,
+      context_chain TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -139,7 +140,13 @@ export function _initTestDatabase(): void {
 
 // ─── Tasks ──────────────────────────────────────────────────────
 
-export function createTask(task: Omit<Task, 'created_at' | 'updated_at'> & { created_at?: string; updated_at?: string }): Task {
+export function createTask(
+  task: Omit<Task, 'created_at' | 'updated_at' | 'context_chain'> & {
+    created_at?: string;
+    updated_at?: string;
+    context_chain?: string | null;
+  },
+): Task {
   const now = new Date().toISOString();
   const row: Task = {
     id: task.id,
@@ -158,32 +165,36 @@ export function createTask(task: Omit<Task, 'created_at' | 'updated_at'> & { cre
     override_skip_gate: task.override_skip_gate ?? 0,
     source_channel: task.source_channel ?? null,
     source_chat_id: task.source_chat_id ?? null,
+    context_chain: task.context_chain ?? null,
     created_at: task.created_at ?? now,
     updated_at: task.updated_at ?? now,
   };
 
-  db.prepare(`
-    INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, override_skip_gate, source_channel, source_chat_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id, row.parent_id, row.campaign_id, row.state, row.description, row.priority,
-    row.assigned_agent, row.assigned_engineer_id, row.intent_type,
-    row.reject_count_tactical, row.reject_count_strategic,
-    row.rubric, row.artifacts_path, row.override_skip_gate,
-    row.source_channel, row.source_chat_id,
-    row.created_at, row.updated_at,
-  );
+  const insertTaskTxn = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, override_skip_gate, source_channel, source_chat_id, context_chain, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      row.id, row.parent_id, row.campaign_id, row.state, row.description, row.priority,
+      row.assigned_agent, row.assigned_engineer_id, row.intent_type,
+      row.reject_count_tactical, row.reject_count_strategic,
+      row.rubric, row.artifacts_path, row.override_skip_gate,
+      row.source_channel, row.source_chat_id, row.context_chain,
+      row.created_at, row.updated_at,
+    );
 
-  // Write initial flow_log entry
-  writeFlowLog({
-    task_id: row.id,
-    at: row.created_at,
-    from_state: null,
-    to_state: row.state,
-    agent_role: null,
-    reason: 'task created',
-    duration_ms: null,
+    // Write initial flow_log entry (atomic with task creation)
+    writeFlowLog({
+      task_id: row.id,
+      at: row.created_at,
+      from_state: null,
+      to_state: row.state,
+      agent_role: null,
+      reason: 'task created',
+      duration_ms: null,
+    });
   });
+  insertTaskTxn();
 
   return row;
 }
@@ -220,17 +231,20 @@ export function updateTaskState(
   const now = new Date().toISOString();
   const fromState = task.state;
 
-  db.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(toState, now, taskId);
+  const updateStateTxn = db.transaction(() => {
+    db.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(toState, now, taskId);
 
-  writeFlowLog({
-    task_id: taskId,
-    at: now,
-    from_state: fromState,
-    to_state: toState,
-    agent_role: agentRole ?? null,
-    reason: reason ?? null,
-    duration_ms: null,
+    writeFlowLog({
+      task_id: taskId,
+      at: now,
+      from_state: fromState,
+      to_state: toState,
+      agent_role: agentRole ?? null,
+      reason: reason ?? null,
+      duration_ms: null,
+    });
   });
+  updateStateTxn();
 }
 
 const TASK_UPDATE_FIELDS = new Set([
@@ -238,7 +252,7 @@ const TASK_UPDATE_FIELDS = new Set([
   'assigned_agent', 'assigned_engineer_id', 'intent_type',
   'reject_count_tactical', 'reject_count_strategic',
   'rubric', 'artifacts_path', 'override_skip_gate',
-  'source_channel', 'source_chat_id', 'updated_at',
+  'source_channel', 'source_chat_id', 'context_chain',
 ]);
 
 export function updateTask(taskId: string, updates: Partial<Omit<Task, 'id' | 'created_at'>>): void {
@@ -259,6 +273,16 @@ export function updateTask(taskId: string, updates: Partial<Omit<Task, 'id' | 'c
   values.push(taskId);
 
   db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function appendContextChain(taskId: string, role: AgentRole, output: string): void {
+  const task = getTaskById(taskId);
+  if (!task) return;
+  const chain: { role: string; output: string }[] = task.context_chain
+    ? JSON.parse(task.context_chain)
+    : [];
+  chain.push({ role, output: output.slice(0, 5000) });
+  updateTask(taskId, { context_chain: JSON.stringify(chain) });
 }
 
 // ─── Flow Log ───────────────────────────────────────────────────
@@ -305,7 +329,7 @@ export function recordAgentRun(run: Omit<AgentRun, 'id'>): number {
 }
 
 const AGENT_RUN_UPDATE_FIELDS = new Set([
-  'model', 'updated_at', 'finished_at', 'status',
+  'model', 'finished_at', 'status',
   'input_tokens', 'output_tokens', 'error',
 ]);
 
@@ -334,6 +358,12 @@ export function getActiveRuns(): AgentRun[] {
 
 export function getRunsByTask(taskId: string): AgentRun[] {
   return db.prepare('SELECT * FROM agent_runs WHERE task_id = ? ORDER BY started_at').all(taskId) as AgentRun[];
+}
+
+export function getRecentRunsForTask(taskId: string, limit: number = 10): AgentRun[] {
+  return db.prepare(
+    'SELECT * FROM agent_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?',
+  ).all(taskId, limit) as AgentRun[];
 }
 
 // ─── Costs ──────────────────────────────────────────────────────

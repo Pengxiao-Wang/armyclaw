@@ -76,6 +76,20 @@ const ALL_TOOLS: LLMTool[] = [
       required: [],
     },
   },
+  {
+    name: 'claude_code',
+    description: 'Delegate a coding task to Claude Code (an AI coding agent). Use this as your PRIMARY tool for all code work: implementing features, fixing bugs, refactoring, writing tests, debugging. Claude Code has its own tools (Read, Write, Edit, Bash, Grep, Glob) and works autonomously in the working directory. Give it clear, specific instructions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Detailed instructions for Claude Code. Include: what to do, which files to touch, expected behavior, and any constraints.',
+        },
+      },
+      required: ['prompt'],
+    },
+  },
 ];
 
 // ─── Tool Permission Matrix ────────────────────────────────────
@@ -98,7 +112,7 @@ const TOOL_PERMISSIONS: Record<AgentRole, { allowed: string[]; denied: string[] 
     denied: ['file_write'],
   },
   engineer: {
-    allowed: ['search', 'file_read', 'file_write', 'file_list', 'code_execute', 'test_run'],
+    allowed: ['claude_code', 'search', 'file_read', 'file_write', 'file_list', 'code_execute', 'test_run'],
     denied: [],
   },
 };

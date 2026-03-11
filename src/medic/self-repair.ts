@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { STALL_THRESHOLD_MS, CONSECUTIVE_FAILURE_THRESHOLD } from '../config.js';
-import { getActiveRuns, getTaskById, updateTaskState, writeFlowLog } from '../db.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTaskState, writeFlowLog } from '../db.js';
 import { logger } from '../logger.js';
 import type { AgentRun, RecoveryAction, TaskState } from '../types.js';
 
@@ -53,17 +53,15 @@ export class Medic {
 
     const now = Date.now();
 
-    // Group runs by task to detect consecutive failures
-    const runsByTask = new Map<string, AgentRun[]>();
-    for (const run of activeRuns) {
-      const list = runsByTask.get(run.task_id) ?? [];
-      list.push(run);
-      runsByTask.set(run.task_id, list);
-    }
-
     for (const run of activeRuns) {
       const updatedAt = new Date(run.updated_at).getTime();
       const stalledMs = now - updatedAt;
+
+      // Get recent runs for this task (all statuses, not just 'running')
+      const recentRuns = getRecentRunsForTask(run.task_id);
+      // Filter out 'running' entries so countConsecutiveErrors works correctly
+      const finishedRuns = recentRuns.filter((r) => r.status !== 'running');
+      const failureCount = this.countConsecutiveErrors(finishedRuns);
 
       // Check 1: stalled task (no update for STALL_THRESHOLD_MS)
       if (stalledMs > STALL_THRESHOLD_MS) {
@@ -72,7 +70,6 @@ export class Medic {
           'Stalled task detected',
         );
 
-        const failureCount = this.countConsecutiveErrors(runsByTask.get(run.task_id) ?? []);
         const action = this.determineRecovery(run, failureCount);
 
         logger.info(
@@ -81,11 +78,10 @@ export class Medic {
         );
 
         await this.executeRecovery(run.task_id, action);
+        continue; // Don't double-trigger on same run
       }
 
       // Check 2: consecutive failures without stalling
-      const taskRuns = runsByTask.get(run.task_id) ?? [];
-      const failureCount = this.countConsecutiveErrors(taskRuns);
       if (failureCount >= CONSECUTIVE_FAILURE_THRESHOLD) {
         logger.warn(
           { taskId: run.task_id, failureCount },

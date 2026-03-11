@@ -41,6 +41,7 @@ export const STRATEGIC_TO_CRITICAL_THRESHOLD = 2;
 // Agent loop
 export const MAX_AGENT_TURNS = parseInt(process.env.MAX_AGENT_TURNS || '50', 10);
 export const TOOL_EXEC_TIMEOUT_MS = 30_000; // 30 seconds per tool call
+export const CLAUDE_CODE_TIMEOUT_MS = 300_000; // 5 minutes for Claude Code sessions
 
 // War Room
 export const WAR_ROOM_PORT = parseInt(process.env.WAR_ROOM_PORT || '3939', 10);

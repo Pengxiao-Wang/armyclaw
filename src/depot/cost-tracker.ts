@@ -42,6 +42,11 @@ export class CostTracker {
     agentRole: AgentRole,
     llmCall: () => Promise<LLMResponse>,
   ): Promise<LLMResponse> {
+    // Pre-flight budget check — block before spending money
+    if (this.isBudgetExceeded()) {
+      throw new Error(`Daily budget exceeded ($${this.getDailySpend().toFixed(2)} / $${DAILY_BUDGET_USD})`);
+    }
+
     const response = await llmCall();
 
     const cost = this.calculateCost(response.model, response.input_tokens, response.output_tokens);

@@ -30,7 +30,7 @@ const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
   DONE: [],
   FAILED: ['RECEIVED'],
   CANCELLED: [],
-  PAUSED: ['RECEIVED', 'SPLITTING', 'PLANNING', 'DISPATCHING', 'EXECUTING'],
+  PAUSED: ['RECEIVED', 'SPLITTING', 'PLANNING', 'GATE1_REVIEW', 'DISPATCHING', 'EXECUTING', 'GATE2_REVIEW', 'DELIVERING'],
 };
 
 // Non-terminal states that can be paused or cancelled

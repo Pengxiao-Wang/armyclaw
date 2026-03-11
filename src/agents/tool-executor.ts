@@ -4,11 +4,11 @@
 // All file operations are sandboxed to a working directory.
 // ═══════════════════════════════════════════════════════════
 
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { TOOL_EXEC_TIMEOUT_MS } from '../config.js';
+import { TOOL_EXEC_TIMEOUT_MS, CLAUDE_CODE_TIMEOUT_MS } from '../config.js';
 import { logger } from '../logger.js';
 import type { ToolUseBlock, ToolResultBlock } from '../types.js';
 
@@ -52,6 +52,9 @@ export class ToolExecutor {
           break;
         case 'test_run':
           result = this.testRun(block.input as { command?: string });
+          break;
+        case 'claude_code':
+          result = this.claudeCode(block.input as { prompt: string });
           break;
         default:
           result = { output: `Unknown tool: ${block.name}`, is_error: true };
@@ -125,17 +128,25 @@ export class ToolExecutor {
       return { output: `Search path not found: ${input.path ?? '.'}`, is_error: true };
     }
 
-    // Use grep recursively
-    const globArg = input.glob ? `--include="${input.glob}"` : '';
-    const cmd = `grep -rn ${globArg} "${input.pattern}" "${searchDir}" 2>/dev/null | head -100`;
+    // Use execFileSync to avoid shell injection (SEC-1 fix)
+    const args = ['-rn'];
+    if (input.glob) {
+      args.push('--include', input.glob);
+    }
+    args.push('--', input.pattern, searchDir);
 
     try {
-      const output = execSync(cmd, {
+      const output = execFileSync('grep', args, {
         encoding: 'utf-8',
         timeout: TOOL_EXEC_TIMEOUT_MS,
         cwd: this.workDir,
+        maxBuffer: 1024 * 1024,
       }).trim();
-      return { output: output || 'No matches found.', is_error: false };
+
+      // Truncate to 100 lines (replaces piped `| head -100`)
+      const lines = output.split('\n');
+      const truncated = lines.slice(0, 100).join('\n');
+      return { output: truncated || 'No matches found.', is_error: false };
     } catch {
       return { output: 'No matches found.', is_error: false };
     }
@@ -150,7 +161,7 @@ export class ToolExecutor {
         timeout,
         cwd: this.workDir,
         maxBuffer: 1024 * 1024, // 1MB
-        env: { ...process.env, NODE_ENV: 'production' },
+        env: this.getSafeEnv(false),
       }).trim();
 
       // Truncate very long output
@@ -180,6 +191,58 @@ export class ToolExecutor {
     return this.codeExecute({ command: cmd });
   }
 
+  private claudeCode(input: { prompt: string }): ToolExecResult {
+    try {
+      const output = execFileSync('claude', ['-p', '--verbose'], {
+        input: input.prompt,
+        encoding: 'utf-8',
+        timeout: CLAUDE_CODE_TIMEOUT_MS,
+        cwd: this.workDir,
+        maxBuffer: 5 * 1024 * 1024, // 5MB
+        env: this.getSafeEnv(true),
+      }).trim();
+
+      // Truncate very long output
+      const maxLen = 50_000;
+      if (output.length > maxLen) {
+        return {
+          output: output.slice(0, maxLen) + `\n... (truncated, ${output.length} chars total)`,
+          is_error: false,
+        };
+      }
+
+      return { output: output || '(no output)', is_error: false };
+    } catch (err: unknown) {
+      const execErr = err as { status?: number; stdout?: string; stderr?: string; message?: string };
+      const stderr = execErr.stderr?.trim() ?? '';
+      const stdout = execErr.stdout?.trim() ?? '';
+      const combined = [stdout, stderr].filter(Boolean).join('\n');
+      return {
+        output: combined || execErr.message || 'Claude Code execution failed',
+        is_error: true,
+      };
+    }
+  }
+
+  // ─── Environment Safety ────────────────────────────────────
+
+  /**
+   * Build a safe environment for child processes.
+   * Only whitelisted variables are passed through.
+   * @param includeApiKeys — if true, includes ANTHROPIC_API_KEY (for Claude Code CLI)
+   */
+  private getSafeEnv(includeApiKeys = false): Record<string, string> {
+    const SAFE_KEYS = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'TERM', 'NODE_ENV', 'TMPDIR'];
+    const env: Record<string, string> = { NODE_ENV: 'production' };
+    for (const key of SAFE_KEYS) {
+      if (process.env[key]) env[key] = process.env[key]!;
+    }
+    if (includeApiKeys && process.env.ANTHROPIC_API_KEY) {
+      env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    }
+    return env;
+  }
+
   // ─── Path Safety ───────────────────────────────────────────
 
   /**
@@ -188,7 +251,7 @@ export class ToolExecutor {
    */
   private resolveSafe(relativePath: string): string {
     const resolved = path.resolve(this.workDir, relativePath);
-    if (!resolved.startsWith(this.workDir)) {
+    if (resolved !== this.workDir && !resolved.startsWith(this.workDir + path.sep)) {
       throw new Error(`Path traversal blocked: ${relativePath} resolves outside work directory`);
     }
     return resolved;

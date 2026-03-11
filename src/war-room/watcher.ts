@@ -293,20 +293,31 @@ export class DbWatcher {
     const task = this.wdb.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as Task | undefined;
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
-    const stateMap: Record<string, TaskState> = {
-      pause: 'PAUSED' as TaskState,
-      cancel: 'CANCELLED' as TaskState,
-      resume: 'RECEIVED' as TaskState,
-    };
-    const newState = stateMap[action];
+    let newState: TaskState;
     const now = new Date().toISOString();
 
-    this.wdb.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(newState, now, taskId);
+    if (action === 'resume') {
+      // Restore pre-pause state from flow_log (BUG-3 fix)
+      const pauseEntry = this.wdb.prepare(
+        "SELECT from_state FROM flow_log WHERE task_id = ? AND to_state = 'PAUSED' ORDER BY at DESC LIMIT 1",
+      ).get(taskId) as { from_state: string } | undefined;
+      newState = (pauseEntry?.from_state ?? 'RECEIVED') as TaskState;
+    } else {
+      const stateMap: Record<string, TaskState> = {
+        pause: 'PAUSED' as TaskState,
+        cancel: 'CANCELLED' as TaskState,
+      };
+      newState = stateMap[action];
+    }
 
-    this.wdb.prepare(`
-      INSERT INTO flow_log (task_id, at, from_state, to_state, agent_role, reason, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(taskId, now, task.state, newState, null, `War Room: ${action}`, null);
+    const txn = this.wdb.transaction(() => {
+      this.wdb!.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(newState, now, taskId);
+      this.wdb!.prepare(`
+        INSERT INTO flow_log (task_id, at, from_state, to_state, agent_role, reason, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(taskId, now, task.state, newState, null, `War Room: ${action}`, null);
+    });
+    txn();
 
     logger.info({ taskId, from: task.state, to: newState, action }, 'Task controlled via War Room');
 

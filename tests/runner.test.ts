@@ -246,6 +246,50 @@ describe('AgentRunner', () => {
         }),
       );
     });
+
+    it('should throw and record error when max turns exhausted', async () => {
+      const { updateAgentRun } = await import('../src/db.js');
+
+      // Every call returns tool_use → agent never finishes
+      vi.spyOn(costTracker, 'trackCall').mockImplementation(async () => ({
+        content: 'still working...',
+        tool_use: [{ type: 'tool_use' as const, id: 'tu-loop', name: 'file_list', input: {} }],
+        input_tokens: 10,
+        output_tokens: 5,
+        model: 'claude-sonnet-4-20250514',
+        stop_reason: 'tool_use',
+      }));
+
+      await expect(runner.runAgent(mockTask, 'engineer', 'do it')).rejects.toThrow('exhausted');
+
+      // Should record error status
+      expect(updateAgentRun).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          status: 'error',
+          error: 'max_turns_exhausted',
+        }),
+      );
+    });
+
+    it('should preserve last content when max turns exhausted', async () => {
+      let callCount = 0;
+
+      vi.spyOn(costTracker, 'trackCall').mockImplementation(async () => {
+        callCount++;
+        return {
+          content: `progress at turn ${callCount}`,
+          tool_use: [{ type: 'tool_use' as const, id: `tu-${callCount}`, name: 'file_list', input: {} }],
+          input_tokens: 10,
+          output_tokens: 5,
+          model: 'claude-sonnet-4-20250514',
+          stop_reason: 'tool_use',
+        };
+      });
+
+      // Should throw, but the error recording should have captured the last content
+      await expect(runner.runAgent(mockTask, 'engineer', 'do it')).rejects.toThrow('exhausted');
+    });
   });
 
   describe('loadSoul', () => {

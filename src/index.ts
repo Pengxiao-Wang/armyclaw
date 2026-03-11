@@ -11,6 +11,7 @@ import {
   getTaskById,
   getTasksByParent,
   updateTask,
+  appendContextChain,
 } from './db.js';
 import { ChannelRegistry } from './channels/registry.js';
 import { LarkChannel } from './channels/lark.js';
@@ -138,24 +139,37 @@ export class HQ {
   private processLoop(): void {
     if (!this.running) return;
 
-    const processNext = async () => {
+    const processBatch = async () => {
       if (!this.running) return;
 
-      const taskId = this.queue.dequeue();
-      if (taskId) {
-        try {
-          const task = getTaskById(taskId);
-          if (task) {
-            await this.processTask(task);
-          }
-        } catch (err) {
-          logger.error(
-            { taskId, error: err instanceof Error ? err.message : String(err) },
-            'Task processing failed',
-          );
-        } finally {
-          this.queue.complete(taskId);
-        }
+      // Dequeue up to maxConcurrent tasks (queue.dequeue respects the limit)
+      const taskPromises: Promise<void>[] = [];
+
+      while (true) {
+        const taskId = this.queue.dequeue();
+        if (!taskId) break;
+
+        taskPromises.push(
+          (async () => {
+            try {
+              const task = getTaskById(taskId);
+              if (task) {
+                await this.processTask(task);
+              }
+            } catch (err) {
+              logger.error(
+                { taskId, error: err instanceof Error ? err.message : String(err) },
+                'Task processing failed',
+              );
+            } finally {
+              this.queue.complete(taskId);
+            }
+          })(),
+        );
+      }
+
+      if (taskPromises.length > 0) {
+        await Promise.allSettled(taskPromises);
       }
 
       // Schedule next iteration
@@ -164,7 +178,7 @@ export class HQ {
       }, this.queue.getQueueLength() > 0 ? 100 : 1000);
     };
 
-    processNext();
+    processBatch();
   }
 
   /**
@@ -247,6 +261,7 @@ export class HQ {
 
   private async handleAdjutantOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
+    appendContextChain(task.id, AR.ADJUTANT, raw);
 
     // If multiple tasks detected, create subtasks and split
     if (output.tasks.length > 1) {
@@ -299,6 +314,7 @@ export class HQ {
 
   private async handleChiefOfStaffOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(ChiefOfStaffOutputSchema, raw) as ChiefOfStaffOutput;
+    appendContextChain(task.id, AR.CHIEF_OF_STAFF, raw);
 
     // Update task intent type
     updateTask(task.id, { intent_type: output.type });
@@ -330,6 +346,7 @@ export class HQ {
 
   private async handleInspectorOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(InspectorOutputSchema, raw) as InspectorOutput;
+    appendContextChain(task.id, AR.INSPECTOR, raw);
 
     // Freeze rubric on first review
     if (!task.rubric && output.rubric.length > 0) {
@@ -358,6 +375,7 @@ export class HQ {
 
   private async handleOperationsOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(OperationsOutputSchema, raw) as OperationsOutput;
+    appendContextChain(task.id, AR.OPERATIONS, raw);
 
     // Create subtasks for each assignment
     for (const assignment of output.assignments) {
@@ -388,6 +406,7 @@ export class HQ {
 
   private async handleEngineerOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(EngineerOutputSchema, raw) as EngineerOutput;
+    appendContextChain(task.id, AR.ENGINEER, raw);
 
     if (output.status === 'completed') {
       transition(task.id, TS.GATE2_REVIEW, AR.ENGINEER, 'Execution completed');
@@ -437,6 +456,7 @@ export class HQ {
   private async handleDelivery(task: Task, raw: string): Promise<void> {
     // Adjutant delivers the result back to the user
     const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
+    appendContextChain(task.id, AR.ADJUTANT, raw);
 
     if (output.reply) {
       await this.replyToSource(task, output.reply);
