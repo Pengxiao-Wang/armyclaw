@@ -251,6 +251,13 @@ export class HQ {
       return;
     }
 
+    // DELIVERING is mechanical — extract from context_chain, no LLM needed
+    if (task.state === TS.DELIVERING) {
+      logger.info({ taskId: task.id, state: task.state }, 'Processing task (delivery)');
+      await this.handleDelivery(task);
+      return;
+    }
+
     const role = routeTask(task);
     logger.info({ taskId: task.id, state: task.state, role }, 'Processing task');
 
@@ -279,10 +286,6 @@ export class HQ {
 
         case TS.EXECUTING:
           await this.handleEngineerOutput(task, rawOutput);
-          break;
-
-        case TS.DELIVERING:
-          await this.handleDelivery(task, rawOutput);
           break;
       }
 
@@ -395,10 +398,7 @@ export class HQ {
 
     switch (output.type) {
       case IntentType.ANSWER:
-        // Direct answer — skip planning, go to delivery
-        if (output.answer) {
-          await this.replyToSource(task, output.answer);
-        }
+        // Direct answer — answer is in context_chain, will be delivered by adjutant after review
         transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, 'Direct answer — skipping to review');
         this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
         break;
@@ -540,16 +540,74 @@ export class HQ {
     }
   }
 
-  private async handleDelivery(task: Task, raw: string): Promise<void> {
-    // Adjutant delivers the result back to the user
-    const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
-    appendContextChain(task.id, AR.ADJUTANT, raw);
+  /**
+   * Deliver results to user. Mechanical — no LLM call needed.
+   * Extracts the answer from context_chain (chief_of_staff's answer or engineer's result).
+   */
+  private async handleDelivery(task: Task): Promise<void> {
+    const reply = this.extractDeliveryContent(task);
 
-    if (output.reply) {
-      await this.replyToSource(task, output.reply);
+    if (reply) {
+      await this.replyToSource(task, reply);
+      logger.info({ taskId: task.id, replyLength: reply.length }, 'Delivery sent');
+    } else {
+      logger.warn({ taskId: task.id }, 'Delivery: no content to deliver');
     }
 
     transition(task.id, TS.DONE, AR.ADJUTANT, 'Delivered');
+  }
+
+  /**
+   * Extract the deliverable content from context_chain.
+   * Walks the chain backwards to find the most relevant output.
+   */
+  private extractDeliveryContent(task: Task): string | null {
+    if (!task.context_chain) return null;
+
+    let chain: { role: string; output: string }[];
+    try {
+      chain = JSON.parse(task.context_chain);
+    } catch {
+      return null;
+    }
+
+    // For ANSWER type: chief_of_staff's answer field is the deliverable
+    if (task.intent_type === IntentType.ANSWER) {
+      const cosEntry = chain.find((e) => e.role === AR.CHIEF_OF_STAFF);
+      if (cosEntry) {
+        try {
+          const parsed = JSON.parse(cosEntry.output) as ChiefOfStaffOutput;
+          if (parsed.answer) return parsed.answer;
+        } catch {
+          // Fall through to raw output
+          return cosEntry.output;
+        }
+      }
+    }
+
+    // For EXECUTION/RESEARCH: walk backwards, take the last engineer or chief_of_staff output
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const entry = chain[i]!;
+      if (entry.role === AR.ENGINEER) {
+        try {
+          const parsed = JSON.parse(entry.output) as EngineerOutput;
+          return parsed.result;
+        } catch {
+          return entry.output;
+        }
+      }
+      if (entry.role === AR.CHIEF_OF_STAFF) {
+        try {
+          const parsed = JSON.parse(entry.output) as ChiefOfStaffOutput;
+          return parsed.answer ?? entry.output;
+        } catch {
+          return entry.output;
+        }
+      }
+    }
+
+    // Fallback: last entry in chain
+    return chain.length > 0 ? chain[chain.length - 1]!.output : null;
   }
 }
 
