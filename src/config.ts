@@ -38,6 +38,10 @@ export const CONSECUTIVE_FAILURE_THRESHOLD = 5;
 export const TACTICAL_TO_STRATEGIC_THRESHOLD = 3;
 export const STRATEGIC_TO_CRITICAL_THRESHOLD = 2;
 
+// Agent loop
+export const MAX_AGENT_TURNS = parseInt(process.env.MAX_AGENT_TURNS || '50', 10);
+export const TOOL_EXEC_TIMEOUT_MS = 30_000; // 30 seconds per tool call
+
 // War Room
 export const WAR_ROOM_PORT = parseInt(process.env.WAR_ROOM_PORT || '3939', 10);
 export const WAR_ROOM_POLL_INTERVAL_MS = 1000;

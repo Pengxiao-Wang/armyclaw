@@ -84,6 +84,8 @@ export interface Task {
   rubric: string | null; // JSON string[]
   artifacts_path: string | null;
   override_skip_gate: number; // 0 or 1 (SQLite boolean)
+  source_channel: string | null;
+  source_chat_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -228,6 +230,29 @@ export type OnInboundMessage = (message: InboundMessage) => void;
 
 // --- LLM Types ---
 
+// Content blocks follow the Anthropic Messages API format
+
+export interface TextBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface ToolUseBlock {
+  type: 'tool_use';
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+export interface ToolResultBlock {
+  type: 'tool_result';
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+}
+
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+
 export interface LLMRequest {
   model: string;
   system: string;
@@ -239,7 +264,7 @@ export interface LLMRequest {
 
 export interface LLMMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ContentBlock[];
 }
 
 export interface LLMTool {
@@ -250,10 +275,11 @@ export interface LLMTool {
 
 export interface LLMResponse {
   content: string;
+  tool_use?: ToolUseBlock[];
   input_tokens: number;
   output_tokens: number;
   model: string;
-  stop_reason: string;
+  stop_reason: string; // 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
 // --- Tool Permission ---
