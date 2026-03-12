@@ -12,10 +12,11 @@ import type { DbWatcher } from './watcher.js';
 
 export function createApi(watcher: DbWatcher): http.RequestListener {
   return async (req, res) => {
-    // CORS headers
+    // CORS + no-cache headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Cache-Control', 'no-store');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -182,6 +183,7 @@ export function createApi(watcher: DbWatcher): http.RequestListener {
           // Serve static HTML for the Sand Table dashboard
           if (url.pathname === '/' || url.pathname === '/index.html') {
             res.setHeader('Content-Type', 'text/html');
+            res.setHeader('Cache-Control', 'no-store');
             res.writeHead(200);
             res.end(getSandTableHTML());
             return;

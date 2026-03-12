@@ -381,6 +381,11 @@ export class HQ {
       // Single task — needs full pipeline
       transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Adjutant processed');
 
+      // Send adjutant's acknowledgment if provided
+      if (output.reply) {
+        await this.replyToSource(task, output.reply);
+      }
+
       if (shouldSkipPlanning(task, this.templates)) {
         transition(task.id, TS.DISPATCHING, AR.ADJUTANT, 'Template fast-path — skip planning');
         logger.info({ taskId: task.id }, 'Template fast-path: SPLITTING → DISPATCHING (skip PLANNING)');
@@ -445,10 +450,13 @@ export class HQ {
     } else {
       // Reject — route based on level
       const level = output.level ?? 'tactical';
-      routeReject(task.id, level);
-      // Re-enqueue for reprocessing
-      const updatedTask = getTaskById(task.id);
-      if (updatedTask && updatedTask.state !== TS.FAILED) {
+      const targetState = routeReject(task.id, level);
+      if (targetState === TS.FAILED) {
+        // Notify user that the task could not be completed
+        const findings = output.findings.join('; ') || 'Task rejected';
+        await this.replyToSource(task, findings);
+      } else {
+        // Re-enqueue for reprocessing
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
       }
     }
@@ -534,6 +542,8 @@ export class HQ {
 
     if (anyFailed) {
       transition(parentId, TS.FAILED, AR.ADJUTANT, 'Subtask(s) failed');
+      const failedDescs = subtasks.filter(st => st.state === TS.FAILED).map(st => st.description).join(', ');
+      this.replyToSource(parent, `部分子任务失败: ${failedDescs}`).catch(() => {});
       logger.info({ parentId }, 'Parent task failed — subtask(s) failed');
     } else {
       transition(parentId, TS.DELIVERING, AR.ADJUTANT, 'All subtasks completed');
