@@ -1,8 +1,7 @@
 <h1 align="center">⚔️ ArmyClaw</h1>
 
 <p align="center">
-  <strong>Other frameworks let agents chat. We give them a chain of command.<br>
-  别的框架让 Agent 聊天。我们给它们一条指挥链。</strong>
+  <strong>Other frameworks let agents chat. We give them a chain of command.</strong>
 </p>
 
 <p align="center">
@@ -10,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="README_CN.md">中文版</a> ·
   <a href="#-why-armyclaw">Why ArmyClaw</a> ·
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-architecture">Architecture</a> ·
@@ -180,11 +180,11 @@ Two processes, one database. No event bus, no IPC, no message queue.
 
 | Role | Model | Tools | Responsibility |
 |------|-------|-------|----------------|
-| **Adjutant** 副官 | Sonnet | — | Task splitting, high-EQ communication, progress reports |
-| **Chief of Staff** 参谋长 | Opus | search, file_read, file_list | Intent classification, research, planning, campaign design |
-| **Operations** 指挥官 | Sonnet | — | Task assignment, dependency management, parallel coordination |
-| **Inspector General** 督察长 | Opus | file_read, file_list, test_run | Gate reviews (plan + output), rubric freezing, reject escalation |
-| **Engineer** 工兵 | Opus | All (7 tools) | Code implementation, bug fixes, testing — delegates to Claude Code |
+| **Adjutant** | Sonnet | — | Task splitting, high-EQ communication, progress reports |
+| **Chief of Staff** | Opus | search, file_read, file_list | Intent classification, research, planning, campaign design |
+| **Operations** | Sonnet | — | Task assignment, dependency management, parallel coordination |
+| **Inspector General** | Opus | file_read, file_list, test_run | Gate reviews (plan + output), rubric freezing, reject escalation |
+| **Engineer** | Opus | All (7 tools) | Code implementation, bug fixes, testing — delegates to Claude Code |
 
 ### Task Pipeline (PDCA)
 
