@@ -146,6 +146,68 @@ All configuration is via environment variables. See `.env.example` for defaults.
 | `MAX_AGENT_TURNS` | `50` | Max agentic loop iterations per agent run |
 | `WAR_ROOM_PORT` | `3939` | Sand Table HTTP server port |
 
+### Lark Channel / 飞书接入
+
+ArmyClaw connects to Lark (飞书) so users can chat with the bot directly.
+
+#### Interactive Setup (recommended)
+
+```bash
+npm run setup:lark
+```
+
+The wizard walks you through:
+1. Creating a Lark App at [open.larksuite.com](https://open.larksuite.com/app)
+2. Entering credentials (App ID, App Secret, Verification Token)
+3. Configuring DM policy and @mention rules
+4. Testing the connection
+5. Auto-writing config to `.env`
+
+#### Manual Setup
+
+Add to `.env`:
+```bash
+LARK_APP_ID=cli_xxxxxxxxxx
+LARK_APP_SECRET=your_app_secret
+LARK_VERIFICATION_TOKEN=your_token
+```
+
+See `.env.example` for all Lark options.
+
+#### Event Subscription
+
+Choose one of two modes in the Lark Developer Console → Events & Callbacks:
+
+| Mode | Setup | Best for |
+|------|-------|----------|
+| **WebSocket** (default) | Select "Long Connection" — no public URL needed | Development, private networks |
+| **Webhook** | Set Request URL to `https://<your-domain>/webhook/event` | Production with public endpoint |
+
+Subscribe to event: `im.message.receive_v1`
+
+#### Required Permissions
+
+In Lark Developer Console → Permissions & Scopes, enable:
+- `im:message` — Send and receive messages
+- `im:message.group_at_msg` — Receive group @mention messages
+- `im:resource` — Download message resources
+
+After configuration, publish the app version and get admin approval. Then `npm run dev` — you should see `Lark channel connected` in the logs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LARK_APP_ID` | *(empty — skip)* | Lark app ID (starts with `cli_`) |
+| `LARK_APP_SECRET` | *(empty — skip)* | Lark app secret |
+| `LARK_VERIFICATION_TOKEN` | *(empty)* | Event subscription verification token |
+| `LARK_ENCRYPT_KEY` | *(empty)* | Optional AES encryption key for events |
+| `LARK_WEBHOOK_PORT` | `3003` | Webhook HTTP server port |
+| `LARK_WEBHOOK_PATH` | `/webhook/event` | Webhook endpoint path |
+| `LARK_DM_POLICY` | `allowlist` | `allowlist` or `open` |
+| `LARK_ALLOW_FROM` | *(empty)* | Comma-separated allowed user IDs |
+| `LARK_REQUIRE_MENTION` | `true` | Require @mention in group chats |
+
+> If `LARK_APP_ID` and `LARK_APP_SECRET` are empty, the Lark channel is silently skipped — HQ runs normally without it.
+
 ### Model Pricing (built-in)
 
 | Model | Input ($/1M tokens) | Output ($/1M tokens) |
@@ -176,7 +238,7 @@ npm run test:watch    # Watch mode
 npx tsc --noEmit      # Type check only
 ```
 
-Test coverage: 280+ tests across 14 test suites.
+Test coverage: 305 tests across 15 test suites.
 
 ---
 
@@ -213,6 +275,7 @@ armyclaw/
 │   ├── db.ts                 # SQLite schema + data access
 │   ├── index.ts              # HQ entry point
 │   ├── logger.ts             # Pino logger
+│   ├── setup-lark.ts         # Interactive Lark channel setup wizard
 │   └── types.ts              # Core type definitions
 ├── souls/                    # Agent personality files (SOUL.md per role)
 ├── tests/                    # Vitest test suites
