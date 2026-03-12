@@ -6,14 +6,15 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "tsx src/launcher.ts",
     "start:war-room": "node dist/war-room/server.js",
     "dev": "tsx --env-file=.env src/index.ts",
     "dev:war-room": "tsx src/war-room/server.ts",
+    "setup": "tsx src/setup/wizard.ts",
+    "setup:lark": "tsx src/setup/wizard.ts --channel lark",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "setup:lark": "tsx src/setup-lark.ts"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
