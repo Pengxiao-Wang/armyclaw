@@ -259,14 +259,14 @@ describe('routeReject — circuit breaker', () => {
       state: TaskState.GATE2_REVIEW, description: 'Test', priority: TaskPriority.MEDIUM,
       assigned_agent: null, assigned_engineer_id: null, intent_type: null,
       reject_count_tactical: 2,
-      reject_count_strategic: 1,  // after tactical→strategic escalation, this will be checked
+      reject_count_strategic: 1,  // tactical→strategic escalation also increments strategic count
       rubric: null, artifacts_path: null, override_skip_gate: 0,
     });
 
     const target = routeReject('task-1', RejectLevel.TACTICAL);
-    // tactical escalates to strategic (count=3 >= threshold=3),
-    // then strategic checks count (1 < threshold=2), stays at strategic
-    expect(target).toBe(TaskState.PLANNING);
+    // tactical count 2→3 >= threshold(3) → escalates to strategic
+    // strategic count 1→2 >= threshold(2) → escalates to critical → FAILED
+    expect(target).toBe(TaskState.FAILED);
   });
 
   it('should throw on missing task', () => {

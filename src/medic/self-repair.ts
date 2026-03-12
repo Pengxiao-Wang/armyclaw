@@ -4,10 +4,12 @@
 // ═══════════════════════════════════════════════════════════
 
 import { STALL_THRESHOLD_MS, CONSECUTIVE_FAILURE_THRESHOLD } from '../config.js';
-import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, updateTaskState, writeFlowLog } from '../db.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, writeFlowLog } from '../db.js';
 import { QueuePriority } from '../herald/queue.js';
+import { transition } from '../herald/state-machine.js';
 import { logger } from '../logger.js';
-import type { AgentRun, RecoveryAction, TaskState } from '../types.js';
+import { TaskState } from '../types.js';
+import type { AgentRun, RecoveryAction } from '../types.js';
 
 export class Medic {
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -154,15 +156,15 @@ export class Medic {
         break;
 
       case 'escalate':
-        // Transition to FAILED, notify
+        // Transition to FAILED via state machine (triggers terminal hook for parent notification)
         logger.warn({ taskId }, 'Recovery: escalating — transitioning to FAILED');
-        updateTaskState(taskId, 'FAILED' as TaskState, task.assigned_agent ?? undefined, 'medic: escalated after 3+ failures');
+        transition(taskId, TaskState.FAILED, task.assigned_agent ?? undefined, 'medic: escalated after 3+ failures');
         break;
 
       case 'manual_required':
-        // Mark task as needing manual intervention
+        // Mark task as needing manual intervention via state machine
         logger.error({ taskId }, 'Recovery: manual intervention required');
-        updateTaskState(taskId, 'PAUSED' as TaskState, task.assigned_agent ?? undefined, 'medic: manual_required — 5+ consecutive failures');
+        transition(taskId, TaskState.PAUSED, task.assigned_agent ?? undefined, 'medic: manual_required — 5+ consecutive failures');
         break;
     }
   }

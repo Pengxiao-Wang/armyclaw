@@ -46,6 +46,29 @@ const NON_TERMINAL_STATES: Set<TaskState> = new Set([
   TaskState.PAUSED,
 ]);
 
+// ─── Terminal States ────────────────────────────────────────────
+
+const TERMINAL_STATES: Set<TaskState> = new Set([
+  TaskState.DONE,
+  TaskState.FAILED,
+  TaskState.CANCELLED,
+]);
+
+// ─── Terminal Hook ──────────────────────────────────────────────
+// Called when any task enters a terminal state.
+// HQ registers a listener to propagate subtask completion to parents.
+
+type OnTerminalFn = (taskId: string, parentId: string) => void;
+let _onTerminal: OnTerminalFn | null = null;
+
+export function setTerminalHook(fn: OnTerminalFn): void {
+  _onTerminal = fn;
+}
+
+export function clearTerminalHook(): void {
+  _onTerminal = null;
+}
+
 // ─── Public API ─────────────────────────────────────────────────
 
 /**
@@ -114,6 +137,11 @@ export function transition(
   );
 
   updateTaskState(taskId, to, agentRole, reason);
+
+  // Fire terminal hook — propagate subtask completion to parent
+  if (TERMINAL_STATES.has(to) && task.parent_id && _onTerminal) {
+    _onTerminal(taskId, task.parent_id);
+  }
 }
 
 /**
@@ -148,13 +176,10 @@ export function routeReject(
   }
 
   if (effectiveLevel === RejectLevel.STRATEGIC) {
-    const currentStrategic = level === RejectLevel.STRATEGIC
-      ? task.reject_count_strategic + 1
-      : task.reject_count_strategic;
-
-    if (level === RejectLevel.STRATEGIC) {
-      updateTask(taskId, { reject_count_strategic: currentStrategic });
-    }
+    // Always increment strategic count — whether from direct strategic reject
+    // or escalated from tactical. Otherwise escalation never reaches critical.
+    const currentStrategic = task.reject_count_strategic + 1;
+    updateTask(taskId, { reject_count_strategic: currentStrategic });
 
     if (currentStrategic >= STRATEGIC_TO_CRITICAL_THRESHOLD) {
       logger.warn(

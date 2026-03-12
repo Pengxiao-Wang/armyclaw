@@ -32,7 +32,7 @@ import { CostTracker } from './depot/cost-tracker.js';
 import { MAX_TASK_ERRORS } from './config.js';
 import { TaskQueue, QueuePriority } from './herald/queue.js';
 import { routeTask, shouldSkipPlanning } from './herald/router.js';
-import { transition, routeReject } from './herald/state-machine.js';
+import { transition, routeReject, setTerminalHook } from './herald/state-machine.js';
 import { logger } from './logger.js';
 import type {
   Task,
@@ -74,6 +74,12 @@ export class HQ {
     // Load API credentials
     this.credentials.loadFromEnv();
     logger.info({ providers: this.credentials.getLoadedProviders() }, 'Credential proxy loaded');
+
+    // Register terminal hook — when a subtask reaches DONE/FAILED/CANCELLED,
+    // automatically check if the parent task can proceed.
+    setTerminalHook((_childId, parentId) => {
+      this.checkSubtaskCompletion(parentId);
+    });
 
     // Start medic (stuck-task recovery) — pass enqueue callback so medic can re-queue recovered tasks
     this.medic.start(10_000, (taskId, priority) => this.queue.enqueue(taskId, priority));
@@ -238,11 +244,8 @@ export class HQ {
    * 5. Re-enqueue if task needs further processing
    */
   private async processTask(task: Task): Promise<void> {
-    // Terminal states — check if parent needs updating, then return
+    // Terminal states — nothing to do (parent notification is handled by the terminal hook)
     if (task.state === TS.DONE || task.state === TS.FAILED || task.state === TS.CANCELLED) {
-      if (task.parent_id) {
-        this.checkSubtaskCompletion(task.parent_id);
-      }
       return;
     }
 

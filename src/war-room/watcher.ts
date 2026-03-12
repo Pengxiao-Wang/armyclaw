@@ -7,8 +7,10 @@
 import Database from 'better-sqlite3';
 
 import { DB_PATH, WAR_ROOM_POLL_INTERVAL_MS } from '../config.js';
+import { transition } from '../herald/state-machine.js';
 import { logger } from '../logger.js';
-import type { Task, AgentRole, AgentRun, AgentConfig, TaskState } from '../types.js';
+import { TaskState } from '../types.js';
+import type { Task, AgentRole, AgentRun, AgentConfig } from '../types.js';
 
 // ─── Watcher Types ──────────────────────────────────────────
 
@@ -294,7 +296,6 @@ export class DbWatcher {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     let newState: TaskState;
-    const now = new Date().toISOString();
 
     if (action === 'resume') {
       // Restore pre-pause state from flow_log (BUG-3 fix)
@@ -310,14 +311,8 @@ export class DbWatcher {
       newState = stateMap[action];
     }
 
-    const txn = this.wdb.transaction(() => {
-      this.wdb!.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(newState, now, taskId);
-      this.wdb!.prepare(`
-        INSERT INTO flow_log (task_id, at, from_state, to_state, agent_role, reason, duration_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(taskId, now, task.state, newState, null, `War Room: ${action}`, null);
-    });
-    txn();
+    // Use transition() so terminal hook fires (e.g., cancel propagates to parent)
+    transition(taskId, newState, undefined, `War Room: ${action}`);
 
     logger.info({ taskId, from: task.state, to: newState, action }, 'Task controlled via War Room');
 
