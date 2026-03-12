@@ -289,6 +289,12 @@ armyclaw/
 
 ---
 
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Pengxiao-Wang/armyclaw&type=Date)](https://star-history.com/#Pengxiao-Wang/armyclaw&Date)
+
+---
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
