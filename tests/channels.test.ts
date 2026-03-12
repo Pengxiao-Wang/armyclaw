@@ -202,24 +202,19 @@ describe('LarkChannel', () => {
     expect(lark.isConnected()).toBe(false);
   });
 
-  it('should connect successfully', async () => {
+  it('should skip connect when no credentials', async () => {
     await lark.connect();
-    expect(lark.isConnected()).toBe(true);
+    // Without LARK_APP_ID/SECRET, connect gracefully skips
+    expect(lark.isConnected()).toBe(false);
   });
 
   it('should disconnect successfully', async () => {
-    await lark.connect();
+    // Even without connect, disconnect should not throw
     await lark.disconnect();
     expect(lark.isConnected()).toBe(false);
   });
 
   it('should throw when sending while disconnected', async () => {
     await expect(lark.sendMessage('chat-1', 'Hello')).rejects.toThrow('not connected');
-  });
-
-  it('should accept sendMessage when connected (stub)', async () => {
-    await lark.connect();
-    // Should not throw — stub just logs
-    await lark.sendMessage('chat-1', 'Hello');
   });
 });

@@ -11,6 +11,7 @@ import {
   getTaskById,
   getTasksByParent,
   updateTask,
+  updateTaskState,
   appendContextChain,
 } from './db.js';
 import { ChannelRegistry } from './channels/registry.js';
@@ -28,6 +29,7 @@ import { CredentialProxy } from './arsenal/credential-proxy.js';
 import { LLMClient } from './arsenal/llm-client.js';
 import { Medic } from './medic/self-repair.js';
 import { CostTracker } from './depot/cost-tracker.js';
+import { MAX_TASK_ERRORS } from './config.js';
 import { TaskQueue, QueuePriority } from './herald/queue.js';
 import { routeTask, shouldSkipPlanning } from './herald/router.js';
 import { transition, routeReject } from './herald/state-machine.js';
@@ -59,6 +61,7 @@ export class HQ {
   private templates: TaskTemplate[] = [];
   private running = false;
   private loopTimer: NodeJS.Timeout | null = null;
+  private pendingRetries: { taskId: string; readyAt: number; priority: QueuePriority }[] = [];
 
   constructor() {
     this.runner = new AgentRunner(this.llm, this.costTracker);
@@ -72,8 +75,8 @@ export class HQ {
     this.credentials.loadFromEnv();
     logger.info({ providers: this.credentials.getLoadedProviders() }, 'Credential proxy loaded');
 
-    // Start medic (stuck-task recovery)
-    this.medic.start();
+    // Start medic (stuck-task recovery) — pass enqueue callback so medic can re-queue recovered tasks
+    this.medic.start(10_000, (taskId, priority) => this.queue.enqueue(taskId, priority));
 
     // Register channels
     this.channels.register(new LarkChannel());
@@ -142,6 +145,9 @@ export class HQ {
     const processBatch = async () => {
       if (!this.running) return;
 
+      // Flush pending retries whose backoff has expired
+      this.flushPendingRetries();
+
       // Dequeue up to maxConcurrent tasks (queue.dequeue respects the limit)
       const taskPromises: Promise<void>[] = [];
 
@@ -151,18 +157,32 @@ export class HQ {
 
         taskPromises.push(
           (async () => {
+            let hadError = false;
             try {
               const task = getTaskById(taskId);
               if (task) {
                 await this.processTask(task);
               }
             } catch (err) {
+              hadError = true;
+              // Error handling is done inside processTask's catch block.
+              // This outer catch is a safety net for unexpected errors.
               logger.error(
                 { taskId, error: err instanceof Error ? err.message : String(err) },
-                'Task processing failed',
+                'Task processing failed (outer)',
               );
             } finally {
+              // Must complete before re-enqueue — enqueue() skips active tasks
               this.queue.complete(taskId);
+
+              // Only re-enqueue on success. On error, processTask handles retry scheduling.
+              if (!hadError) {
+                const updated = getTaskById(taskId);
+                const terminal: string[] = [TS.DONE, TS.FAILED, TS.CANCELLED, TS.PAUSED, TS.EXECUTING];
+                if (updated && !terminal.includes(updated.state)) {
+                  this.queue.enqueue(taskId, QueuePriority.NEW_TASK);
+                }
+              }
             }
           })(),
         );
@@ -179,6 +199,33 @@ export class HQ {
     };
 
     processBatch();
+  }
+
+  /**
+   * Flush pending retries whose backoff timer has expired.
+   * Tasks are re-enqueued for processing; stale entries (terminal tasks) are discarded.
+   */
+  private flushPendingRetries(): void {
+    if (this.pendingRetries.length === 0) return;
+    const now = Date.now();
+    const terminal = new Set<string>([TS.DONE, TS.FAILED, TS.CANCELLED]);
+    this.pendingRetries = this.pendingRetries.filter((r) => {
+      if (now >= r.readyAt) {
+        const task = getTaskById(r.taskId);
+        if (task && !terminal.has(task.state)) {
+          this.queue.enqueue(r.taskId, r.priority);
+        }
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Schedule a task retry with exponential backoff.
+   */
+  private scheduleRetry(taskId: string, delayMs: number, priority: QueuePriority): void {
+    this.pendingRetries.push({ taskId, readyAt: Date.now() + delayMs, priority });
   }
 
   /**
@@ -201,6 +248,13 @@ export class HQ {
 
     // Paused — skip
     if (task.state === TS.PAUSED) {
+      return;
+    }
+
+    // DELIVERING is mechanical — extract from context_chain, no LLM needed
+    if (task.state === TS.DELIVERING) {
+      logger.info({ taskId: task.id, state: task.state }, 'Processing task (delivery)');
+      await this.handleDelivery(task);
       return;
     }
 
@@ -233,17 +287,40 @@ export class HQ {
         case TS.EXECUTING:
           await this.handleEngineerOutput(task, rawOutput);
           break;
+      }
 
-        case TS.DELIVERING:
-          await this.handleDelivery(task, rawOutput);
-          break;
+      // Success — reset error count so transient failures don't accumulate across phases
+      if (task.error_count > 0) {
+        updateTask(task.id, { error_count: 0 });
       }
     } catch (err) {
-      logger.error(
-        { taskId: task.id, role, error: err instanceof Error ? err.message : String(err) },
-        'Agent execution failed',
-      );
-      // Don't transition to FAILED on first error — let medic handle retries
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const newErrorCount = (task.error_count ?? 0) + 1;
+      updateTask(task.id, { error_count: newErrorCount });
+
+      if (newErrorCount >= MAX_TASK_ERRORS) {
+        // Max errors exceeded — force-fail (bypass state machine validation)
+        logger.error(
+          { taskId: task.id, errorCount: newErrorCount, error: errorMsg },
+          'Task failed — max consecutive errors exceeded',
+        );
+        updateTaskState(task.id, TS.FAILED as TaskState, role,
+          `Failed after ${newErrorCount} consecutive errors: ${errorMsg}`);
+        this.replyToSource(task, `[Task Failed] ${task.id}: ${errorMsg}`).catch(() => {});
+        if (task.parent_id) {
+          this.checkSubtaskCompletion(task.parent_id);
+        }
+      } else {
+        // Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 60s)
+        const backoffMs = Math.min(2000 * Math.pow(2, newErrorCount - 1), 60_000);
+        logger.warn(
+          { taskId: task.id, role, errorCount: newErrorCount, nextRetryMs: backoffMs, error: errorMsg },
+          'Agent error — scheduled retry with backoff',
+        );
+        this.scheduleRetry(task.id, backoffMs, QueuePriority.NEW_TASK);
+      }
+      // Re-throw so the outer finally knows this was an error (hadError flag)
+      throw err;
     }
   }
 
@@ -262,6 +339,15 @@ export class HQ {
   private async handleAdjutantOutput(task: Task, raw: string): Promise<void> {
     const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
     appendContextChain(task.id, AR.ADJUTANT, raw);
+
+    // Short-circuit: adjutant can handle simple messages (greetings, chitchat, trivial Q&A) directly
+    if (output.direct_reply && output.reply) {
+      transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Direct reply — short-circuit');
+      await this.replyToSource(task, output.reply);
+      transition(task.id, TS.DONE, AR.ADJUTANT, 'Adjutant handled directly');
+      logger.info({ taskId: task.id }, 'Short-circuit: adjutant replied directly, skipping pipeline');
+      return;
+    }
 
     // If multiple tasks detected, create subtasks and split
     if (output.tasks.length > 1) {
@@ -292,23 +378,21 @@ export class HQ {
       // Transition parent to EXECUTING — it waits for subtasks to complete
       transition(task.id, TS.EXECUTING, AR.ADJUTANT, 'Waiting for subtasks');
     } else {
-      // Single task — check for template fast-path
+      // Single task — needs full pipeline
       transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Adjutant processed');
 
+      // Send adjutant's acknowledgment if provided
+      if (output.reply) {
+        await this.replyToSource(task, output.reply);
+      }
+
       if (shouldSkipPlanning(task, this.templates)) {
-        // Fast-path: template says skip planning, go directly to dispatching
         transition(task.id, TS.DISPATCHING, AR.ADJUTANT, 'Template fast-path — skip planning');
         logger.info({ taskId: task.id }, 'Template fast-path: SPLITTING → DISPATCHING (skip PLANNING)');
       } else {
         transition(task.id, TS.PLANNING, AR.ADJUTANT, 'Ready for planning');
       }
-      // Re-enqueue for next agent
       this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
-    }
-
-    // Send reply back to channel if there is one
-    if (output.reply) {
-      await this.replyToSource(task, output.reply);
     }
   }
 
@@ -321,10 +405,7 @@ export class HQ {
 
     switch (output.type) {
       case IntentType.ANSWER:
-        // Direct answer — skip planning, go to delivery
-        if (output.answer) {
-          await this.replyToSource(task, output.answer);
-        }
+        // Direct answer — answer is in context_chain, will be delivered by adjutant after review
         transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, 'Direct answer — skipping to review');
         this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
         break;
@@ -355,7 +436,12 @@ export class HQ {
 
     if (output.verdict === 'approve') {
       if (task.state === TS.GATE1_REVIEW) {
-        transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
+        // ANSWER type already replied — skip dispatching, go straight to delivery
+        if (task.intent_type === IntentType.ANSWER) {
+          transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 1 approved (direct answer)');
+        } else {
+          transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
+        }
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
       } else if (task.state === TS.GATE2_REVIEW) {
         transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 2 approved');
@@ -364,10 +450,13 @@ export class HQ {
     } else {
       // Reject — route based on level
       const level = output.level ?? 'tactical';
-      routeReject(task.id, level);
-      // Re-enqueue for reprocessing
-      const updatedTask = getTaskById(task.id);
-      if (updatedTask && updatedTask.state !== TS.FAILED) {
+      const targetState = routeReject(task.id, level);
+      if (targetState === TS.FAILED) {
+        // Notify user that the task could not be completed
+        const findings = output.findings.join('; ') || 'Task rejected';
+        await this.replyToSource(task, findings);
+      } else {
+        // Re-enqueue for reprocessing
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
       }
     }
@@ -414,9 +503,17 @@ export class HQ {
     } else if (output.status === 'failed') {
       transition(task.id, TS.FAILED, AR.ENGINEER, `Execution failed: ${output.result}`);
     } else if (output.status === 'blocked') {
-      // Re-enqueue with lower priority, will be picked up after dependencies resolve
-      logger.warn({ taskId: task.id, reason: output.result }, 'Engineer blocked');
-      this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
+      const newErrorCount = (task.error_count ?? 0) + 1;
+      updateTask(task.id, { error_count: newErrorCount });
+
+      if (newErrorCount >= MAX_TASK_ERRORS) {
+        logger.error({ taskId: task.id, blockedCount: newErrorCount }, 'Engineer blocked too many times — failing');
+        transition(task.id, TS.FAILED, AR.ENGINEER, `Blocked ${newErrorCount} times: ${output.result}`);
+      } else {
+        const backoffMs = Math.min(5000 * Math.pow(2, newErrorCount - 1), 120_000);
+        logger.warn({ taskId: task.id, reason: output.result, attempt: newErrorCount, nextRetryMs: backoffMs }, 'Engineer blocked — backing off');
+        this.scheduleRetry(task.id, backoffMs, QueuePriority.EXECUTING);
+      }
     }
   }
 
@@ -445,6 +542,8 @@ export class HQ {
 
     if (anyFailed) {
       transition(parentId, TS.FAILED, AR.ADJUTANT, 'Subtask(s) failed');
+      const failedDescs = subtasks.filter(st => st.state === TS.FAILED).map(st => st.description).join(', ');
+      this.replyToSource(parent, `部分子任务失败: ${failedDescs}`).catch(() => {});
       logger.info({ parentId }, 'Parent task failed — subtask(s) failed');
     } else {
       transition(parentId, TS.DELIVERING, AR.ADJUTANT, 'All subtasks completed');
@@ -453,16 +552,79 @@ export class HQ {
     }
   }
 
-  private async handleDelivery(task: Task, raw: string): Promise<void> {
-    // Adjutant delivers the result back to the user
-    const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
-    appendContextChain(task.id, AR.ADJUTANT, raw);
+  /**
+   * Deliver results to user. Mechanical — no LLM call needed.
+   * Extracts the answer from context_chain (chief_of_staff's answer or engineer's result).
+   */
+  private async handleDelivery(task: Task): Promise<void> {
+    const reply = this.extractDeliveryContent(task);
 
-    if (output.reply) {
-      await this.replyToSource(task, output.reply);
+    if (reply) {
+      await this.replyToSource(task, reply);
+      logger.info({ taskId: task.id, replyLength: reply.length }, 'Delivery sent');
+    } else {
+      logger.warn({ taskId: task.id }, 'Delivery: no content to deliver');
     }
 
     transition(task.id, TS.DONE, AR.ADJUTANT, 'Delivered');
+  }
+
+  /**
+   * Extract JSON from raw LLM output (may contain thinking text + ```json blocks).
+   * Same logic as parseAgentOutput but returns parsed object or null.
+   */
+  private extractJSON(raw: string): Record<string, unknown> | null {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      const match = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (match) {
+        try {
+          return JSON.parse(match[1]!.trim()) as Record<string, unknown>;
+        } catch { /* fall through */ }
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Extract the deliverable content from context_chain.
+   * Walks the chain backwards to find the most relevant output.
+   */
+  private extractDeliveryContent(task: Task): string | null {
+    if (!task.context_chain) return null;
+
+    let chain: { role: string; output: string }[];
+    try {
+      chain = JSON.parse(task.context_chain);
+    } catch {
+      return null;
+    }
+
+    // For ANSWER type: chief_of_staff's answer field is the deliverable
+    if (task.intent_type === IntentType.ANSWER) {
+      const cosEntry = chain.find((e) => e.role === AR.CHIEF_OF_STAFF);
+      if (cosEntry) {
+        const parsed = this.extractJSON(cosEntry.output);
+        if (parsed?.answer) return parsed.answer as string;
+      }
+    }
+
+    // For EXECUTION/RESEARCH: walk backwards, take the last engineer or chief_of_staff output
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const entry = chain[i]!;
+      if (entry.role === AR.ENGINEER) {
+        const parsed = this.extractJSON(entry.output);
+        if (parsed?.result) return parsed.result as string;
+      }
+      if (entry.role === AR.CHIEF_OF_STAFF) {
+        const parsed = this.extractJSON(entry.output);
+        if (parsed?.answer) return parsed.answer as string;
+      }
+    }
+
+    // Fallback: last entry in chain
+    return chain.length > 0 ? chain[chain.length - 1]!.output : null;
   }
 }
 

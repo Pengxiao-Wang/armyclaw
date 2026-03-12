@@ -18,6 +18,9 @@ export class ChannelRegistry {
       logger.warn({ channel: channel.name }, 'Channel already registered, replacing');
     }
     this.channels.set(channel.name, channel);
+    if (this.onMessage) {
+      channel.setInboundHandler?.(this.onMessage);
+    }
     logger.info({ channel: channel.name }, 'Channel registered');
   }
 
@@ -26,6 +29,9 @@ export class ChannelRegistry {
    */
   setMessageHandler(handler: OnInboundMessage): void {
     this.onMessage = handler;
+    for (const channel of this.channels.values()) {
+      channel.setInboundHandler?.(handler);
+    }
   }
 
   /**

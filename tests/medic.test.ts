@@ -5,6 +5,7 @@ vi.mock('../src/db.js', () => ({
   getActiveRuns: vi.fn(() => []),
   getRecentRunsForTask: vi.fn(() => []),
   getTaskById: vi.fn(),
+  updateTask: vi.fn(),
   updateTaskState: vi.fn(),
   writeFlowLog: vi.fn(),
 }));
@@ -19,7 +20,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 import { Medic } from '../src/medic/self-repair.js';
-import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTaskState, writeFlowLog } from '../src/db.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, updateTaskState, writeFlowLog } from '../src/db.js';
 import type { AgentRun, Task } from '../src/types.js';
 
 function makeRun(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -55,9 +56,11 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     reject_count_strategic: 0,
     rubric: null,
     artifacts_path: null,
+    error_count: 0,
     override_skip_gate: 0,
     source_channel: null,
     source_chat_id: null,
+    context_chain: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -134,21 +137,23 @@ describe('Medic', () => {
   });
 
   describe('executeRecovery()', () => {
-    it('handles retry action by logging flow', async () => {
+    it('handles retry action by resetting error_count and logging flow', async () => {
       vi.mocked(getTaskById).mockReturnValue(makeTask());
 
       await medic.executeRecovery('task-1', 'retry');
 
+      expect(updateTask).toHaveBeenCalledWith('task-1', { error_count: 0 });
       expect(writeFlowLog).toHaveBeenCalledOnce();
       const logArg = vi.mocked(writeFlowLog).mock.calls[0]![0];
       expect(logArg.reason).toContain('retry');
     });
 
-    it('handles reassign action by logging flow', async () => {
+    it('handles reassign action by resetting error_count, clearing engineer, and logging flow', async () => {
       vi.mocked(getTaskById).mockReturnValue(makeTask());
 
       await medic.executeRecovery('task-1', 'reassign');
 
+      expect(updateTask).toHaveBeenCalledWith('task-1', { error_count: 0, assigned_engineer_id: null });
       expect(writeFlowLog).toHaveBeenCalledOnce();
       const logArg = vi.mocked(writeFlowLog).mock.calls[0]![0];
       expect(logArg.reason).toContain('reassign');

@@ -38,6 +38,9 @@ export const CONSECUTIVE_FAILURE_THRESHOLD = 5;
 export const TACTICAL_TO_STRATEGIC_THRESHOLD = 3;
 export const STRATEGIC_TO_CRITICAL_THRESHOLD = 2;
 
+// Retry / error budget
+export const MAX_TASK_ERRORS = parseInt(process.env.MAX_TASK_ERRORS || '5', 10);
+
 // Agent loop
 export const MAX_AGENT_TURNS = parseInt(process.env.MAX_AGENT_TURNS || '50', 10);
 export const TOOL_EXEC_TIMEOUT_MS = 30_000; // 30 seconds per tool call
@@ -46,3 +49,15 @@ export const CLAUDE_CODE_TIMEOUT_MS = 300_000; // 5 minutes for Claude Code sess
 // War Room
 export const WAR_ROOM_PORT = parseInt(process.env.WAR_ROOM_PORT || '3939', 10);
 export const WAR_ROOM_POLL_INTERVAL_MS = 1000;
+
+// Lark Channel
+export const LARK_CONNECTION_MODE = (process.env.LARK_CONNECTION_MODE || 'websocket') as 'webhook' | 'websocket';
+export const LARK_APP_ID = process.env.LARK_APP_ID || '';
+export const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
+export const LARK_VERIFICATION_TOKEN = process.env.LARK_VERIFICATION_TOKEN || '';
+export const LARK_ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY || '';
+export const LARK_WEBHOOK_PORT = parseInt(process.env.LARK_WEBHOOK_PORT || '3003', 10);
+export const LARK_WEBHOOK_PATH = process.env.LARK_WEBHOOK_PATH || '/webhook/event';
+export const LARK_DM_POLICY = process.env.LARK_DM_POLICY || 'allowlist';
+export const LARK_REQUIRE_MENTION = process.env.LARK_REQUIRE_MENTION !== 'false';
+export const LARK_ALLOW_FROM = (process.env.LARK_ALLOW_FROM || '').split(',').filter(Boolean);
