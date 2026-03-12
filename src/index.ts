@@ -558,6 +558,24 @@ export class HQ {
   }
 
   /**
+   * Extract JSON from raw LLM output (may contain thinking text + ```json blocks).
+   * Same logic as parseAgentOutput but returns parsed object or null.
+   */
+  private extractJSON(raw: string): Record<string, unknown> | null {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      const match = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (match) {
+        try {
+          return JSON.parse(match[1]!.trim()) as Record<string, unknown>;
+        } catch { /* fall through */ }
+      }
+      return null;
+    }
+  }
+
+  /**
    * Extract the deliverable content from context_chain.
    * Walks the chain backwards to find the most relevant output.
    */
@@ -575,13 +593,8 @@ export class HQ {
     if (task.intent_type === IntentType.ANSWER) {
       const cosEntry = chain.find((e) => e.role === AR.CHIEF_OF_STAFF);
       if (cosEntry) {
-        try {
-          const parsed = JSON.parse(cosEntry.output) as ChiefOfStaffOutput;
-          if (parsed.answer) return parsed.answer;
-        } catch {
-          // Fall through to raw output
-          return cosEntry.output;
-        }
+        const parsed = this.extractJSON(cosEntry.output);
+        if (parsed?.answer) return parsed.answer as string;
       }
     }
 
@@ -589,20 +602,12 @@ export class HQ {
     for (let i = chain.length - 1; i >= 0; i--) {
       const entry = chain[i]!;
       if (entry.role === AR.ENGINEER) {
-        try {
-          const parsed = JSON.parse(entry.output) as EngineerOutput;
-          return parsed.result;
-        } catch {
-          return entry.output;
-        }
+        const parsed = this.extractJSON(entry.output);
+        if (parsed?.result) return parsed.result as string;
       }
       if (entry.role === AR.CHIEF_OF_STAFF) {
-        try {
-          const parsed = JSON.parse(entry.output) as ChiefOfStaffOutput;
-          return parsed.answer ?? entry.output;
-        } catch {
-          return entry.output;
-        }
+        const parsed = this.extractJSON(entry.output);
+        if (parsed?.answer) return parsed.answer as string;
       }
     }
 
