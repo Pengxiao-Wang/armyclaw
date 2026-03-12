@@ -340,6 +340,15 @@ export class HQ {
     const output = parseAgentOutput(AdjutantOutputSchema, raw) as AdjutantOutput;
     appendContextChain(task.id, AR.ADJUTANT, raw);
 
+    // Short-circuit: adjutant can handle simple messages (greetings, chitchat, trivial Q&A) directly
+    if (output.direct_reply && output.reply) {
+      transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Direct reply — short-circuit');
+      await this.replyToSource(task, output.reply);
+      transition(task.id, TS.DONE, AR.ADJUTANT, 'Adjutant handled directly');
+      logger.info({ taskId: task.id }, 'Short-circuit: adjutant replied directly, skipping pipeline');
+      return;
+    }
+
     // If multiple tasks detected, create subtasks and split
     if (output.tasks.length > 1) {
       transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Multiple tasks detected');
@@ -369,23 +378,16 @@ export class HQ {
       // Transition parent to EXECUTING — it waits for subtasks to complete
       transition(task.id, TS.EXECUTING, AR.ADJUTANT, 'Waiting for subtasks');
     } else {
-      // Single task — check for template fast-path
+      // Single task — needs full pipeline
       transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Adjutant processed');
 
       if (shouldSkipPlanning(task, this.templates)) {
-        // Fast-path: template says skip planning, go directly to dispatching
         transition(task.id, TS.DISPATCHING, AR.ADJUTANT, 'Template fast-path — skip planning');
         logger.info({ taskId: task.id }, 'Template fast-path: SPLITTING → DISPATCHING (skip PLANNING)');
       } else {
         transition(task.id, TS.PLANNING, AR.ADJUTANT, 'Ready for planning');
       }
-      // Re-enqueue for next agent
       this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
-    }
-
-    // Send reply back to channel if there is one
-    if (output.reply) {
-      await this.replyToSource(task, output.reply);
     }
   }
 

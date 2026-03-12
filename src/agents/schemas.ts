@@ -3,6 +3,7 @@ import { z, type ZodSchema } from 'zod';
 // ─── Agent Output Schemas ───────────────────────────────────────
 
 export const AdjutantOutputSchema = z.object({
+  direct_reply: z.boolean(),
   tasks: z.array(z.object({
     id: z.string(),
     description: z.string(),

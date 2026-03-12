@@ -166,6 +166,7 @@ export interface CampaignPhase {
 }
 
 export interface AdjutantOutput {
+  direct_reply: boolean;
   tasks: { id: string; description: string; priority: TaskPriority }[];
   reply: string;
 }

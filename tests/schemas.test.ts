@@ -11,6 +11,7 @@ import {
 describe('AdjutantOutputSchema', () => {
   it('should validate correct adjutant output', () => {
     const valid = {
+      direct_reply: false,
       tasks: [
         { id: 'task-1', description: 'Do something', priority: 'high' },
       ],
@@ -176,6 +177,7 @@ describe('EngineerOutputSchema', () => {
 describe('parseAgentOutput', () => {
   it('should parse valid JSON string', () => {
     const raw = JSON.stringify({
+      direct_reply: false,
       tasks: [{ id: 't1', description: 'Do it', priority: 'medium' }],
       reply: 'Done',
     });
@@ -189,6 +191,7 @@ describe('parseAgentOutput', () => {
 
 \`\`\`json
 {
+  "direct_reply": false,
   "tasks": [{"id": "t1", "description": "Task", "priority": "low"}],
   "reply": "Created"
 }
