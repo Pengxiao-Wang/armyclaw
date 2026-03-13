@@ -6,6 +6,7 @@
 import { createHash } from 'crypto';
 
 import { CircuitBreaker } from './circuit-breaker.js';
+import { resolveAuth, buildAuthHeaders, recordAuthSuccess, recordAuthFailure } from './auth-profiles.js';
 import {
   CIRCUIT_BREAKER_FAILURE_THRESHOLD,
   CIRCUIT_BREAKER_RESET_TIMEOUT_MS,
@@ -177,9 +178,9 @@ export class LLMClient {
    * this is the production implementation.
    */
   private async callAnthropic(request: LLMRequest): Promise<LLMResponse> {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error('ANTHROPIC_API_KEY not set');
+    const auth = resolveAuth('anthropic');
+    if (!auth) {
+      throw new Error('No Anthropic credentials — set ANTHROPIC_API_KEY, ANTHROPIC_OAUTH_TOKEN, or configure auth-profiles.json');
     }
 
     const body: Record<string, unknown> = {
@@ -208,20 +209,24 @@ export class LLMClient {
       }
     }
 
+    const authHeaders = buildAuthHeaders(auth);
+
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        ...authHeaders,
       },
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
       const errorBody = await res.text();
+      recordAuthFailure(auth.profileId);
       throw new Error(`Anthropic API error ${res.status}: ${errorBody}`);
     }
+
+    recordAuthSuccess(auth.profileId, 'anthropic');
 
     const data = (await res.json()) as {
       content: { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[];

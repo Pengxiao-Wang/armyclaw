@@ -26,6 +26,7 @@ import {
   EngineerOutputSchema,
 } from './agents/schemas.js';
 import { CredentialProxy } from './arsenal/credential-proxy.js';
+import { loadAuthProfiles, getProfileSummary } from './arsenal/auth-profiles.js';
 import { LLMClient } from './arsenal/llm-client.js';
 import { Armory } from './arsenal/armory.js';
 import { ExecProvider } from './arsenal/exec-provider.js';
@@ -80,7 +81,11 @@ export class HQ {
     this.armory.registerProvider(new ClaudeCodeProvider());
     await this.armory.initialize();
 
-    // Load API credentials
+    // Load auth profiles (auth-profiles.json > env vars, supports OAuth tokens + API keys)
+    loadAuthProfiles();
+    logger.info({ profiles: getProfileSummary() }, 'Auth profiles loaded');
+
+    // Load API credentials (legacy env-based proxy)
     this.credentials.loadFromEnv();
     logger.info({ providers: this.credentials.getLoadedProviders() }, 'Credential proxy loaded');
 
