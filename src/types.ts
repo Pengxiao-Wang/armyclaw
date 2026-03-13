@@ -87,6 +87,7 @@ export interface Task {
   override_skip_gate: number; // 0 or 1 (SQLite boolean)
   source_channel: string | null;
   source_chat_id: string | null;
+  source_message_id: string | null;
   context_chain: string | null;
   created_at: string;
   updated_at: string;
@@ -218,6 +219,7 @@ export interface Channel {
   isConnected(): boolean;
   disconnect(): Promise<void>;
   setInboundHandler?(handler: OnInboundMessage): void;
+  completeReaction?(messageId: string, emoji?: string): Promise<void>;
 }
 
 export interface InboundMessage {

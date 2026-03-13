@@ -115,6 +115,14 @@ export class ChannelRegistry {
   }
 
   /**
+   * Complete a reaction on a specific channel (e.g., swap Typing → DONE).
+   */
+  async completeReaction(channelName: string, messageId: string): Promise<void> {
+    const channel = this.channels.get(channelName);
+    await channel?.completeReaction?.(messageId);
+  }
+
+  /**
    * Get names of all registered channels.
    */
   getRegisteredNames(): string[] {
