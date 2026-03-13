@@ -157,6 +157,20 @@ export function createApi(watcher: DbWatcher): http.RequestListener {
           return;
         }
 
+        case '/api/debug/flow': {
+          res.setHeader('Content-Type', 'application/json');
+          res.writeHead(200);
+          res.end(JSON.stringify(watcher.getRecentFlowLog(100)));
+          return;
+        }
+
+        case '/api/debug/runs': {
+          res.setHeader('Content-Type', 'application/json');
+          res.writeHead(200);
+          res.end(JSON.stringify(watcher.getRecentAgentRuns(50)));
+          return;
+        }
+
         case '/api/health': {
           res.setHeader('Content-Type', 'application/json');
           const health = watcher.getHealthStatus();
@@ -582,6 +596,55 @@ function getSandTableHTML(): string {
     position: sticky; bottom: 0;
     background: rgba(29,29,31,0.8); backdrop-filter: saturate(180%) blur(20px);
   }
+
+  /* ── Debug Panel ──────────────────────── */
+  .debug-btn {
+    background: transparent; border: 1px solid var(--text-3); color: var(--text-2);
+    padding: 4px 12px; border-radius: 980px; font-size: 12px; cursor: pointer;
+    font-family: 'SF Mono', SFMono-Regular, Menlo, monospace; letter-spacing: 0.5px;
+    transition: all 0.2s;
+  }
+  .debug-btn:hover { border-color: var(--orange); color: var(--orange); }
+  .debug-btn.active { border-color: var(--orange); color: var(--bg-0); background: var(--orange); }
+
+  .debug-overlay {
+    display: none; position: fixed; top: 52px; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.88); backdrop-filter: blur(12px);
+    z-index: 40; overflow-y: auto; padding: 16px 32px;
+  }
+  .debug-overlay.open { display: block; }
+
+  .debug-log {
+    font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
+    font-size: 12px; line-height: 1.7;
+  }
+  .debug-log .log-entry {
+    display: flex; gap: 12px; padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    align-items: baseline;
+  }
+  .debug-log .log-entry:hover { background: rgba(255,255,255,0.02); }
+  .log-time { color: var(--text-3); white-space: nowrap; min-width: 80px; }
+  .log-task { color: var(--blue); min-width: 90px; cursor: pointer; }
+  .log-task:hover { text-decoration: underline; }
+  .log-agent { min-width: 120px; }
+  .log-detail { color: var(--text-2); flex: 1; }
+  .log-state { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .log-arrow { color: var(--text-3); }
+  .log-reason { color: var(--text-3); font-style: italic; }
+  .log-model { color: var(--text-3); font-size: 11px; }
+  .log-tokens { color: var(--purple); font-size: 11px; }
+  .log-status-running { color: var(--green); }
+  .log-status-success { color: var(--blue); }
+  .log-status-error { color: var(--red); }
+  .log-empty { color: var(--text-3); padding: 40px 0; text-align: center; }
+  .log-type {
+    font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+    min-width: 36px; text-align: center; text-transform: uppercase;
+  }
+  .log-type-flow { background: rgba(41,151,255,0.15); color: var(--blue); }
+  .log-type-run  { background: rgba(191,90,242,0.15); color: var(--purple); }
+  .log-type-progress { background: rgba(48,209,88,0.15); color: var(--green); }
 </style>
 </head>
 <body>
@@ -591,6 +654,7 @@ function getSandTableHTML(): string {
   <div class="header-status">
     <span id="hq-status"><span class="status-dot dot-green"></span> HQ ONLINE</span>
     <span class="timestamp" id="last-refresh">--</span>
+    <button class="debug-btn" id="debug-toggle" onclick="toggleDebug()">DEBUG</button>
     <button class="lang-btn" id="lang-toggle" onclick="toggleLang()">EN</button>
   </div>
 </header>
@@ -690,6 +754,11 @@ function getSandTableHTML(): string {
       </div>
     </div>
   </div>
+</div>
+
+<!-- Debug Overlay -->
+<div class="debug-overlay" id="debug-overlay">
+  <div class="debug-log" id="debug-log"></div>
 </div>
 
 <!-- Task Detail Modal -->
@@ -827,6 +896,8 @@ const I18N = {
   status_idle:     { zh: '空闲', en: 'idle' },
   // Header
   hq_online: { zh: '系统运行中', en: 'System Online' },
+  // Debug panel
+  debug_no_flow:    { zh: '暂无日志', en: 'No log entries' },
   // Buttons
   btn_pause:   { zh: '暂停', en: 'PAUSE' },
   btn_resume:  { zh: '恢复', en: 'RESUME' },
@@ -1534,6 +1605,96 @@ function renderContextChain(task) {
 function toggleCtx(i) {
   const el = document.getElementById('ctx-' + i);
   if (el) el.classList.toggle('open');
+}
+
+// ─── Debug Panel ──────────────────────────────────────────
+
+let debugOpen = false;
+let debugTimer = null;
+
+function toggleDebug() {
+  debugOpen = !debugOpen;
+  document.getElementById('debug-overlay').classList.toggle('open', debugOpen);
+  document.getElementById('debug-toggle').classList.toggle('active', debugOpen);
+  if (debugOpen) {
+    refreshDebugLog();
+    debugTimer = setInterval(refreshDebugLog, 2000);
+  } else {
+    clearInterval(debugTimer);
+    debugTimer = null;
+  }
+}
+
+async function refreshDebugLog() {
+  if (!debugOpen) return;
+  const [flow, runs, progress] = await Promise.all([
+    fetchJSON('/api/debug/flow'),
+    fetchJSON('/api/debug/runs'),
+    fetchJSON('/api/tasks'),
+  ]);
+  // Merge all events into a unified timeline
+  const events = [];
+  if (flow) for (const f of flow) {
+    const from = f.from_state
+      ? '<span class="log-state ' + stateTagClass(f.from_state) + '">' + tState(f.from_state) + '</span> <span class="log-arrow">\u2192</span> '
+      : '';
+    const to = '<span class="log-state ' + stateTagClass(f.to_state) + '">' + tState(f.to_state) + '</span>';
+    const dur = f.duration_ms ? ' <span class="log-tokens">' + fmtDuration(f.duration_ms) + '</span>' : '';
+    const reason = f.reason ? ' <span class="log-reason">' + escapeHtml(f.reason) + '</span>' : '';
+    events.push({
+      ts: f.at,
+      type: 'flow',
+      taskId: f.task_id,
+      agent: f.agent_role,
+      detail: from + to + dur + reason,
+    });
+  }
+  if (runs) for (const r of runs) {
+    const statusCls = 'log-status-' + r.status;
+    const model = (r.model || '').replace('claude-','').replace('-20250514','');
+    const tokens = (r.input_tokens || r.output_tokens)
+      ? ' <span class="log-tokens">' + (r.input_tokens || 0).toLocaleString() + '\u2192' + (r.output_tokens || 0).toLocaleString() + ' tok</span>'
+      : '';
+    const dur = r.started_at && r.finished_at
+      ? ' ' + fmtDuration(new Date(r.finished_at) - new Date(r.started_at))
+      : '';
+    const err = r.error ? ' <span style="color:var(--red)">' + escapeHtml(r.error.slice(0,80)) + '</span>' : '';
+    events.push({
+      ts: r.updated_at || r.started_at,
+      type: 'run',
+      taskId: r.task_id,
+      agent: r.agent_role,
+      detail: '<span class="' + statusCls + '">' + r.status + '</span> ' + model + tokens + dur + err,
+    });
+  }
+  // Sort by timestamp descending
+  events.sort(function(a, b) { return a.ts > b.ts ? -1 : a.ts < b.ts ? 1 : 0; });
+
+  const el = document.getElementById('debug-log');
+  if (!events.length) {
+    el.innerHTML = '<div class="log-empty">' + t('debug_no_flow') + '</div>';
+    return;
+  }
+  let html = '';
+  for (const ev of events) {
+    const typeCls = ev.type === 'flow' ? 'log-type-flow' : 'log-type-run';
+    const typeLabel = ev.type === 'flow' ? (lang === 'zh' ? '\u6D41\u8F6C' : 'FLOW') : (lang === 'zh' ? '\u8C03\u7528' : 'RUN');
+    const agent = ev.agent ? getRoleName(ev.agent) : '';
+    html +=
+      '<div class="log-entry">' +
+        '<span class="log-time">' + fmtTime(ev.ts) + '</span>' +
+        '<span class="log-type ' + typeCls + '">' + typeLabel + '</span>' +
+        '<span class="log-task" onclick="closeDebugAndOpenTask(&quot;' + ev.taskId + '&quot;)">' + ev.taskId.slice(0,8) + '</span>' +
+        '<span class="log-agent">' + agent + '</span>' +
+        '<span class="log-detail">' + ev.detail + '</span>' +
+      '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function closeDebugAndOpenTask(taskId) {
+  if (debugOpen) toggleDebug();
+  openModal(taskId);
 }
 
 // ─── Main Refresh Loop ────────────────────────────────────

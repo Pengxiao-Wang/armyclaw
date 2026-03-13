@@ -127,6 +127,34 @@ const mockWatcher = {
     reject_summary: { tactical: 2, strategic: 1 },
     recovery_events: [],
   }),
+  getRecentFlowLog: () => {
+    const now = Date.now();
+    return [
+      { task_id: 'task-e5f6g7h8', at: new Date(now-30000).toISOString(), from_state: 'DISPATCHING', to_state: 'EXECUTING', agent_role: 'engineer', reason: 'assigned to eng-2', duration_ms: 5000 },
+      { task_id: 'task-q7r8s9t0', at: new Date(now-60000).toISOString(), from_state: 'PLANNING', to_state: 'GATE1_REVIEW', agent_role: 'inspector', reason: 'plan ready for review', duration_ms: 35000 },
+      { task_id: 'task-i9j0k1l2', at: new Date(now-120000).toISOString(), from_state: 'SPLITTING', to_state: 'PLANNING', agent_role: 'chief_of_staff', reason: 'subtasks created', duration_ms: 60000 },
+      { task_id: 'task-m3n4o5p6', at: new Date(now-300000).toISOString(), from_state: null, to_state: 'RECEIVED', agent_role: 'adjutant', reason: 'New task from Lark', duration_ms: null },
+      { task_id: 'task-a1b2c3d4', at: new Date(now-600000).toISOString(), from_state: 'DELIVERING', to_state: 'DONE', agent_role: 'adjutant', reason: 'delivered to user', duration_ms: 10000 },
+      { task_id: 'task-a1b2c3d4', at: new Date(now-900000).toISOString(), from_state: 'GATE2_REVIEW', to_state: 'DELIVERING', agent_role: 'adjutant', reason: 'passed review', duration_ms: 20000 },
+      { task_id: 'task-a1b2c3d4', at: new Date(now-1200000).toISOString(), from_state: 'EXECUTING', to_state: 'GATE2_REVIEW', agent_role: 'inspector', reason: 'implementation complete', duration_ms: 180000 },
+      { task_id: 'task-u1v2w3x4', at: new Date(now-1800000).toISOString(), from_state: 'EXECUTING', to_state: 'FAILED', agent_role: 'operations', reason: 'Max retries exceeded: staging cluster unreachable', duration_ms: 240000 },
+      { task_id: 'task-e5f6g7h8', at: new Date(now-2500000).toISOString(), from_state: 'GATE1_REVIEW', to_state: 'DISPATCHING', agent_role: 'operations', reason: 'approved on 2nd review', duration_ms: 20000 },
+      { task_id: 'task-e5f6g7h8', at: new Date(now-4500000).toISOString(), from_state: 'GATE1_REVIEW', to_state: 'PLANNING', agent_role: 'chief_of_staff', reason: 'rejected: needs rollback detail', duration_ms: 30000 },
+    ];
+  },
+  getRecentAgentRuns: () => {
+    const now = Date.now();
+    return [
+      { task_id: 'task-e5f6g7h8', agent_role: 'engineer', engineer_id: 'eng-2', model: 'claude-opus-4-20250514', started_at: new Date(now-120000).toISOString(), updated_at: new Date(now-5000).toISOString(), finished_at: null, status: 'running', input_tokens: 85000, output_tokens: 12000, error: null },
+      { task_id: 'task-q7r8s9t0', agent_role: 'inspector', engineer_id: null, model: 'claude-opus-4-20250514', started_at: new Date(now-90000).toISOString(), updated_at: new Date(now-45000).toISOString(), finished_at: null, status: 'running', input_tokens: 42000, output_tokens: 3500, error: null },
+      { task_id: 'task-i9j0k1l2', agent_role: 'chief_of_staff', engineer_id: null, model: 'claude-opus-4-20250514', started_at: new Date(now-200000).toISOString(), updated_at: new Date(now-15000).toISOString(), finished_at: null, status: 'running', input_tokens: 63000, output_tokens: 18000, error: null },
+      { task_id: 'task-a1b2c3d4', agent_role: 'adjutant', engineer_id: null, model: 'claude-sonnet-4-20250514', started_at: new Date(now-650000).toISOString(), updated_at: new Date(now-600000).toISOString(), finished_at: new Date(now-600000).toISOString(), status: 'success', input_tokens: 15000, output_tokens: 2800, error: null },
+      { task_id: 'task-a1b2c3d4', agent_role: 'inspector', engineer_id: null, model: 'claude-opus-4-20250514', started_at: new Date(now-950000).toISOString(), updated_at: new Date(now-900000).toISOString(), finished_at: new Date(now-900000).toISOString(), status: 'success', input_tokens: 48000, output_tokens: 5200, error: null },
+      { task_id: 'task-a1b2c3d4', agent_role: 'engineer', engineer_id: 'eng-1', model: 'claude-opus-4-20250514', started_at: new Date(now-2200000).toISOString(), updated_at: new Date(now-1200000).toISOString(), finished_at: new Date(now-1200000).toISOString(), status: 'success', input_tokens: 125000, output_tokens: 38000, error: null },
+      { task_id: 'task-u1v2w3x4', agent_role: 'engineer', engineer_id: null, model: 'claude-opus-4-20250514', started_at: new Date(now-3200000).toISOString(), updated_at: new Date(now-1800000).toISOString(), finished_at: new Date(now-1800000).toISOString(), status: 'error', input_tokens: 95000, output_tokens: 8000, error: 'kubectl connection refused. Staging cluster unreachable after 3 retries.' },
+      { task_id: 'task-e5f6g7h8', agent_role: 'chief_of_staff', engineer_id: null, model: 'claude-opus-4-20250514', started_at: new Date(now-7000000).toISOString(), updated_at: new Date(now-6500000).toISOString(), finished_at: new Date(now-6500000).toISOString(), status: 'success', input_tokens: 35000, output_tokens: 12000, error: null },
+    ];
+  },
 } as any;
 
 const api = createApi(mockWatcher);

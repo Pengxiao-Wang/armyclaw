@@ -386,6 +386,32 @@ export class DbWatcher {
     } catch { return empty; }
   }
 
+  // ─── Debug / Global Log Methods ─────────────────────────────
+
+  /** Recent flow log entries across ALL tasks (global timeline) */
+  getRecentFlowLog(limit = 100): unknown[] {
+    if (!this.rdb) return [];
+    try {
+      return this.rdb.prepare(
+        'SELECT * FROM flow_log ORDER BY at DESC LIMIT ?',
+      ).all(limit);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Recent agent runs across ALL tasks */
+  getRecentAgentRuns(limit = 50): unknown[] {
+    if (!this.rdb) return [];
+    try {
+      return this.rdb.prepare(
+        'SELECT * FROM agent_runs ORDER BY updated_at DESC LIMIT ?',
+      ).all(limit);
+    } catch {
+      return [];
+    }
+  }
+
   // ─── Write Methods ────────────────────────────────────────
 
   setAgentConfigWrite(config: AgentConfig): void {
