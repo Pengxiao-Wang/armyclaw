@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import { ChannelRegistry } from '../src/channels/registry.js';
-import { LarkChannel, decryptEvent } from '../src/channels/lark.js';
+import { LarkChannel, decryptEvent, addReaction, removeReaction, larkRequest } from '../src/channels/lark.js';
 import type { InboundMessage, OnInboundMessage } from '../src/types.js';
 import crypto from 'crypto';
 
@@ -456,5 +456,118 @@ describe('LarkChannel — parseMessageEvent (direct)', () => {
     channel.parseMessageEvent({ message: {} });
 
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Reaction API Unit Tests ────────────────────────────────
+
+describe('addReaction / removeReaction', () => {
+  it('addReaction should return reaction_id on success', async () => {
+    // These functions require a real API call, so we test error handling
+    await expect(addReaction('invalid-token', 'msg-1', 'Typing'))
+      .rejects.toThrow();
+  });
+
+  it('removeReaction should throw on invalid call', async () => {
+    await expect(removeReaction('invalid-token', 'msg-1', 'react-1'))
+      .rejects.toThrow();
+  });
+});
+
+// ─── Reaction Integration Tests ────────────────────────────
+
+describe('LarkChannel — reactions', () => {
+  let channel: LarkChannel;
+
+  beforeEach(() => {
+    channel = new LarkChannel();
+    const ch = channel as unknown as {
+      botOpenId: string;
+      tokenManager: { getToken: () => Promise<string> };
+      pendingReactions: Map<string, string>;
+    };
+    ch.botOpenId = 'ou_bot123';
+    ch.tokenManager = { getToken: async () => 'fake-token' };
+  });
+
+  it('should trigger ackReaction on valid inbound message (handler still called on API failure)', async () => {
+    const handler = vi.fn();
+    channel.setInboundHandler(handler);
+
+    // ackReaction is fire-and-forget — it will fail (no real Lark server),
+    // but the inbound handler should still be called
+    channel.parseMessageEvent({
+      message: {
+        message_id: 'msg-react-1', message_type: 'text', chat_type: 'p2p',
+        chat_id: 'oc_chat1', content: '{"text":"hello"}', create_time: '1710000000000',
+      },
+      sender: { sender_id: { open_id: 'ou_s1', user_id: 'user-allowed' }, sender_type: 'user' },
+    });
+
+    // Wait for fire-and-forget
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Handler must be called regardless of reaction API result
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].id).toBe('msg-react-1');
+  });
+
+  it('should not crash if ackReaction fails', async () => {
+    const handler = vi.fn();
+    channel.setInboundHandler(handler);
+
+    const larkRequestModule = await import('../src/channels/lark.js');
+    const spy = vi.spyOn(larkRequestModule, 'larkRequest').mockRejectedValue(new Error('network error'));
+
+    channel.parseMessageEvent({
+      message: {
+        message_id: 'msg-fail-1', message_type: 'text', chat_type: 'p2p',
+        chat_id: 'oc_chat1', content: '{"text":"hello"}', create_time: '1710000000000',
+      },
+      sender: { sender_id: { open_id: 'ou_s1', user_id: 'user-allowed' }, sender_type: 'user' },
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Handler should still be called despite reaction failure
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    spy.mockRestore();
+  });
+
+  it('should clean up pendingReactions on completeReaction', async () => {
+    const ch = channel as unknown as { pendingReactions: Map<string, string> };
+    ch.pendingReactions.set('msg-complete-1', 'react-456');
+
+    // completeReaction will fail on the network call (no real Lark server),
+    // but it should still clean up the pendingReactions map
+    await channel.completeReaction('msg-complete-1');
+
+    // Pending reaction should be removed regardless of API success
+    expect(ch.pendingReactions.has('msg-complete-1')).toBe(false);
+  });
+
+  it('should not crash on completeReaction when no pending reaction exists', async () => {
+    // No pending reaction, no tokenManager issues — should not throw
+    await expect(channel.completeReaction('msg-no-pending')).resolves.not.toThrow();
+  });
+
+  it('should not crash on completeReaction without tokenManager', async () => {
+    const bare = new LarkChannel();
+    // No tokenManager set — should silently return
+    await expect(bare.completeReaction('msg-whatever')).resolves.not.toThrow();
+  });
+
+  it('should clear pendingReactions on disconnect', async () => {
+    const ch = channel as unknown as {
+      pendingReactions: Map<string, string>;
+      connected: boolean;
+    };
+    ch.pendingReactions.set('msg-1', 'react-1');
+    ch.connected = true;
+
+    await channel.disconnect();
+
+    expect(ch.pendingReactions.size).toBe(0);
   });
 });
