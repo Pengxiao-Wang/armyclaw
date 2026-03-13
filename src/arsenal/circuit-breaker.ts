@@ -42,7 +42,11 @@ export class CircuitBreaker {
       }
 
       case 'half_open':
-        return this.halfOpenAttempts < this.halfOpenMax;
+        if (this.halfOpenAttempts < this.halfOpenMax) {
+          this.halfOpenAttempts++;
+          return true;
+        }
+        return false;
 
       default:
         return false;

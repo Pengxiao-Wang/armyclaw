@@ -471,6 +471,17 @@ export class LarkChannel implements Channel {
     const sender = event.sender as Record<string, unknown>;
     if (!message || !sender) return;
 
+    // Dedup by message_id (Lark WebSocket SDK can redeliver events)
+    const msgId = message.message_id as string | undefined;
+    if (msgId) {
+      if (this.seenEvents.has(msgId)) {
+        logger.debug({ messageId: msgId }, 'Lark: duplicate message — skipping');
+        return;
+      }
+      this.seenEvents.set(msgId, Date.now());
+      this.cleanupSeenEvents();
+    }
+
     // Only handle text messages
     const msgType = message.message_type as string;
     if (msgType !== 'text') {

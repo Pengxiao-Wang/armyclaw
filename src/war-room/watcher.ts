@@ -8,7 +8,8 @@ import Database from 'better-sqlite3';
 
 import { DB_PATH, WAR_ROOM_POLL_INTERVAL_MS } from '../config.js';
 import { logger } from '../logger.js';
-import type { Task, AgentRole, AgentRun, AgentConfig, TaskState } from '../types.js';
+import { TaskState } from '../types.js';
+import type { Task, AgentRole, AgentRun, AgentConfig } from '../types.js';
 
 // ─── Watcher Types ──────────────────────────────────────────
 
@@ -439,10 +440,9 @@ export class DbWatcher {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     let newState: TaskState;
-    const now = new Date().toISOString();
 
     if (action === 'resume') {
-      // Restore pre-pause state from flow_log (BUG-3 fix)
+      // Restore pre-pause state from flow_log
       const pauseEntry = this.wdb.prepare(
         "SELECT from_state FROM flow_log WHERE task_id = ? AND to_state = 'PAUSED' ORDER BY at DESC LIMIT 1",
       ).get(taskId) as { from_state: string } | undefined;
@@ -455,14 +455,15 @@ export class DbWatcher {
       newState = stateMap[action];
     }
 
-    const txn = this.wdb.transaction(() => {
+    // Write state change directly via wdb (avoids dependency on global db in transition())
+    const now = new Date().toISOString();
+    const updateTxn = this.wdb.transaction(() => {
       this.wdb!.prepare('UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?').run(newState, now, taskId);
-      this.wdb!.prepare(`
-        INSERT INTO flow_log (task_id, at, from_state, to_state, agent_role, reason, duration_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(taskId, now, task.state, newState, null, `War Room: ${action}`, null);
+      this.wdb!.prepare(
+        'INSERT INTO flow_log (task_id, at, from_state, to_state, agent_role, reason, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ).run(taskId, now, task.state, newState, null, `War Room: ${action}`, null);
     });
-    txn();
+    updateTxn();
 
     logger.info({ taskId, from: task.state, to: newState, action }, 'Task controlled via War Room');
 

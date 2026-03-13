@@ -1,0 +1,1 @@
+{ "providers": ["filesystem", "exec", "claude_code"], "tools_filter": ["read_file", "list_directory", "search_files", "code_execute", "test_run", "claude_code"] }

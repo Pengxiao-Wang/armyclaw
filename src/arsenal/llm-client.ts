@@ -68,8 +68,9 @@ export class LLMClient {
       return { ...this.mockResponse };
     }
 
-    // Cache check — skip if tools are present (side effects)
-    const cacheKey = request.tools && request.tools.length > 0
+    // Cache check — skip if tools are present (side effects), but allow response-only tools
+    const hasExecutableTools = request.tools && request.tools.length > 0 && !request.tool_choice;
+    const cacheKey = hasExecutableTools
       ? null
       : this.computeCacheKey(request);
 
@@ -201,6 +202,10 @@ export class LLMClient {
         description: t.description,
         input_schema: t.input_schema,
       }));
+
+      if (request.tool_choice) {
+        body.tool_choice = request.tool_choice;
+      }
     }
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {

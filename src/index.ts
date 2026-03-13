@@ -27,12 +27,15 @@ import {
 } from './agents/schemas.js';
 import { CredentialProxy } from './arsenal/credential-proxy.js';
 import { LLMClient } from './arsenal/llm-client.js';
+import { Armory } from './arsenal/armory.js';
+import { ExecProvider } from './arsenal/exec-provider.js';
+import { ClaudeCodeProvider } from './arsenal/claude-code-provider.js';
 import { Medic } from './medic/self-repair.js';
 import { CostTracker } from './depot/cost-tracker.js';
-import { MAX_TASK_ERRORS } from './config.js';
+import { MAX_TASK_ERRORS, PROJECT_DIR, MAX_CONCURRENT_ENGINEERS, MAX_SUBTASKS_HARD_CAP, SUBTASK_SLOT_RESERVE } from './config.js';
 import { TaskQueue, QueuePriority } from './herald/queue.js';
 import { routeTask, shouldSkipPlanning } from './herald/router.js';
-import { transition, routeReject } from './herald/state-machine.js';
+import { transition, routeReject, setTerminalHook } from './herald/state-machine.js';
 import { logger } from './logger.js';
 import type {
   Task,
@@ -54,6 +57,7 @@ export class HQ {
   private channels = new ChannelRegistry();
   private credentials = new CredentialProxy();
   private llm = new LLMClient();
+  private armory = new Armory(PROJECT_DIR);
   private medic = new Medic();
   private costTracker = new CostTracker();
   private runner: AgentRunner;
@@ -64,16 +68,27 @@ export class HQ {
   private pendingRetries: { taskId: string; readyAt: number; priority: QueuePriority }[] = [];
 
   constructor() {
-    this.runner = new AgentRunner(this.llm, this.costTracker);
+    this.runner = new AgentRunner(this.llm, this.costTracker, this.armory);
   }
 
   async start(): Promise<void> {
     logger.info('HQ (指挥所) starting...');
     initDatabase();
 
+    // Initialize Armory — loads MCP servers from armory.json + registers built-in providers
+    this.armory.registerProvider(new ExecProvider());
+    this.armory.registerProvider(new ClaudeCodeProvider());
+    await this.armory.initialize();
+
     // Load API credentials
     this.credentials.loadFromEnv();
     logger.info({ providers: this.credentials.getLoadedProviders() }, 'Credential proxy loaded');
+
+    // Register terminal hook — when a subtask reaches DONE/FAILED/CANCELLED,
+    // automatically check if the parent task can proceed.
+    setTerminalHook((_childId, parentId) => {
+      this.checkSubtaskCompletion(parentId);
+    });
 
     // Start medic (stuck-task recovery) — pass enqueue callback so medic can re-queue recovered tasks
     this.medic.start(10_000, (taskId, priority) => this.queue.enqueue(taskId, priority));
@@ -98,6 +113,7 @@ export class HQ {
     }
     this.queue.shutdown();
     this.medic.stop();
+    await this.armory.shutdown();
     await this.channels.disconnectAll();
     logger.info('HQ (指挥所) shutdown');
   }
@@ -239,11 +255,8 @@ export class HQ {
    * 5. Re-enqueue if task needs further processing
    */
   private async processTask(task: Task): Promise<void> {
-    // Terminal states — check if parent needs updating, then return
+    // Terminal states — nothing to do (parent notification is handled by the terminal hook)
     if (task.state === TS.DONE || task.state === TS.FAILED || task.state === TS.CANCELLED) {
-      if (task.parent_id) {
-        this.checkSubtaskCompletion(task.parent_id);
-      }
       return;
     }
 
@@ -488,10 +501,20 @@ export class HQ {
     const output = parseAgentOutput(OperationsOutputSchema, raw) as OperationsOutput;
     appendContextChain(task.id, AR.OPERATIONS, raw);
 
+    // Cap subtask count: min(MAX_CONCURRENT_ENGINEERS, 8) - reserve
+    const maxSubtasks = Math.min(MAX_CONCURRENT_ENGINEERS, MAX_SUBTASKS_HARD_CAP) - SUBTASK_SLOT_RESERVE;
+    const assignments = output.assignments.slice(0, maxSubtasks);
+    if (output.assignments.length > maxSubtasks) {
+      logger.warn(
+        { taskId: task.id, requested: output.assignments.length, capped: maxSubtasks },
+        'Operations subtask count capped to preserve slot availability',
+      );
+    }
+
     // Create subtasks for each assignment
-    for (const assignment of output.assignments) {
+    for (const assignment of assignments) {
       const subtask = createTask({
-        id: assignment.subtask_id || `task-${randomUUID().slice(0, 8)}`,
+        id: `sub-${randomUUID().slice(0, 8)}`,
         parent_id: task.id,
         campaign_id: task.campaign_id,
         state: TS.EXECUTING,
@@ -507,6 +530,7 @@ export class HQ {
         override_skip_gate: 0,
         source_channel: task.source_channel,
         source_chat_id: task.source_chat_id,
+        complexity: (assignment.complexity as 'simple' | 'moderate' | 'complex') || 'complex',
       });
       this.queue.enqueue(subtask.id, QueuePriority.EXECUTING);
     }
@@ -564,9 +588,22 @@ export class HQ {
 
     const anyFailed = subtasks.some((st) => st.state === TS.FAILED);
 
+    // Aggregate subtask results into parent context_chain
+    for (const st of subtasks) {
+      if (st.state === TS.DONE && st.context_chain) {
+        try {
+          const chain = JSON.parse(st.context_chain) as { role: string; output: string }[];
+          const engineerEntry = chain.find(e => e.role === AR.ENGINEER);
+          if (engineerEntry) {
+            appendContextChain(parentId, AR.ENGINEER, engineerEntry.output);
+          }
+        } catch { /* skip invalid chain */ }
+      }
+    }
+
     if (anyFailed) {
       transition(parentId, TS.FAILED, AR.ADJUTANT, 'Subtask(s) failed');
-      const failedDescs = subtasks.filter(st => st.state === TS.FAILED).map(st => st.description).join(', ');
+      const failedDescs = subtasks.filter(st => st.state === TS.FAILED).map(st => st.description.slice(0, 80)).join('; ');
       this.replyToSource(parent, `部分子任务失败: ${failedDescs}`).catch(() => {});
       this.markReactionTerminal(parent, TS.FAILED);
       logger.info({ parentId }, 'Parent task failed — subtask(s) failed');
@@ -582,6 +619,14 @@ export class HQ {
    * Extracts the answer from context_chain (chief_of_staff's answer or engineer's result).
    */
   private async handleDelivery(task: Task): Promise<void> {
+    // Subtasks don't message user — only parent delivers
+    if (task.parent_id) {
+      transition(task.id, TS.DONE, AR.ENGINEER, 'Subtask delivered to parent');
+      // Check if parent is ready for delivery
+      this.checkSubtaskCompletion(task.parent_id);
+      return;
+    }
+
     const reply = this.extractDeliveryContent(task);
 
     if (reply) {
@@ -592,7 +637,7 @@ export class HQ {
     }
 
     transition(task.id, TS.DONE, AR.ADJUTANT, 'Delivered');
-    this.markReactionDone(task);
+    this.markReactionTerminal(task, TS.DONE);
   }
 
   /**
@@ -618,11 +663,14 @@ export class HQ {
    * Walks the chain backwards to find the most relevant output.
    */
   private extractDeliveryContent(task: Task): string | null {
-    if (!task.context_chain) return null;
+    // Re-read task to get aggregated context_chain (subtask results may have been added)
+    const freshTask = getTaskById(task.id);
+    const contextChain = freshTask?.context_chain ?? task.context_chain;
+    if (!contextChain) return null;
 
     let chain: { role: string; output: string }[];
     try {
-      chain = JSON.parse(task.context_chain);
+      chain = JSON.parse(contextChain);
     } catch {
       return null;
     }
@@ -636,21 +684,36 @@ export class HQ {
       }
     }
 
-    // For EXECUTION/RESEARCH: walk backwards, take the last engineer or chief_of_staff output
-    for (let i = chain.length - 1; i >= 0; i--) {
-      const entry = chain[i]!;
+    // Collect all engineer results (from subtasks aggregated into parent)
+    const engineerResults: string[] = [];
+    for (const entry of chain) {
       if (entry.role === AR.ENGINEER) {
         const parsed = this.extractJSON(entry.output);
-        if (parsed?.result) return parsed.result as string;
+        if (parsed?.result) {
+          engineerResults.push(parsed.result as string);
+        }
       }
+    }
+
+    // Multiple engineer results → concatenate with separators
+    if (engineerResults.length > 1) {
+      return engineerResults.join('\n\n---\n\n');
+    }
+    if (engineerResults.length === 1) {
+      return engineerResults[0]!;
+    }
+
+    // Single engineer or chief_of_staff result (non-subtask tasks)
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const entry = chain[i]!;
       if (entry.role === AR.CHIEF_OF_STAFF) {
         const parsed = this.extractJSON(entry.output);
         if (parsed?.answer) return parsed.answer as string;
       }
     }
 
-    // Fallback: last entry in chain
-    return chain.length > 0 ? chain[chain.length - 1]!.output : null;
+    // No fallback — never leak internal JSON
+    return null;
   }
 }
 
