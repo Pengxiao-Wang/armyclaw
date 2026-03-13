@@ -267,6 +267,125 @@ export class DbWatcher {
     }
   }
 
+  // ─── Infrastructure Stats ─────────────────────────────────
+
+  /** Arsenal stats: LLM call metrics from agent_runs */
+  getArsenalStats(): {
+    total_runs: number;
+    running: number;
+    success: number;
+    error: number;
+    by_model: Record<string, { runs: number; input_tokens: number; output_tokens: number }>;
+    recent_errors: { task_id: string; agent_role: string; model: string; error: string; at: string }[];
+  } {
+    const empty = { total_runs: 0, running: 0, success: 0, error: 0, by_model: {}, recent_errors: [] };
+    if (!this.rdb) return empty;
+    try {
+      const counts = this.rdb.prepare(
+        "SELECT status, COUNT(*) as cnt FROM agent_runs GROUP BY status",
+      ).all() as { status: string; cnt: number }[];
+      let total = 0, running = 0, success = 0, errors = 0;
+      for (const r of counts) {
+        total += r.cnt;
+        if (r.status === 'running') running = r.cnt;
+        else if (r.status === 'success') success = r.cnt;
+        else if (r.status === 'error') errors = r.cnt;
+      }
+
+      const byModelRows = this.rdb.prepare(
+        "SELECT model, COUNT(*) as runs, COALESCE(SUM(input_tokens),0) as inp, COALESCE(SUM(output_tokens),0) as outp FROM agent_runs GROUP BY model",
+      ).all() as { model: string; runs: number; inp: number; outp: number }[];
+      const by_model: Record<string, { runs: number; input_tokens: number; output_tokens: number }> = {};
+      for (const r of byModelRows) {
+        by_model[r.model] = { runs: r.runs, input_tokens: r.inp, output_tokens: r.outp };
+      }
+
+      const recentErrors = this.rdb.prepare(
+        "SELECT task_id, agent_role, model, error, updated_at as at FROM agent_runs WHERE status = 'error' ORDER BY updated_at DESC LIMIT 5",
+      ).all() as { task_id: string; agent_role: string; model: string; error: string; at: string }[];
+
+      return { total_runs: total, running, success, error: errors, by_model, recent_errors: recentErrors };
+    } catch { return empty; }
+  }
+
+  /** Herald stats: queue depth, state distribution, avg durations */
+  getHeraldStats(): {
+    queue_depth: number;
+    by_state: Record<string, number>;
+    by_priority: Record<string, number>;
+    avg_duration_by_state: Record<string, number>;
+    total_tasks: number;
+    completed: number;
+    failed: number;
+  } {
+    const empty = { queue_depth: 0, by_state: {}, by_priority: {}, avg_duration_by_state: {}, total_tasks: 0, completed: 0, failed: 0 };
+    if (!this.rdb) return empty;
+    try {
+      const stateCounts = this.rdb.prepare(
+        "SELECT state, COUNT(*) as cnt FROM tasks GROUP BY state",
+      ).all() as { state: string; cnt: number }[];
+      const by_state: Record<string, number> = {};
+      let total = 0, completed = 0, failed = 0, queue = 0;
+      for (const r of stateCounts) {
+        by_state[r.state] = r.cnt;
+        total += r.cnt;
+        if (r.state === 'DONE') completed = r.cnt;
+        if (r.state === 'FAILED') failed = r.cnt;
+        if (r.state === 'RECEIVED') queue = r.cnt;
+      }
+
+      const priorityCounts = this.rdb.prepare(
+        "SELECT priority, COUNT(*) as cnt FROM tasks GROUP BY priority",
+      ).all() as { priority: string; cnt: number }[];
+      const by_priority: Record<string, number> = {};
+      for (const r of priorityCounts) by_priority[r.priority] = r.cnt;
+
+      const durationRows = this.rdb.prepare(
+        "SELECT to_state, AVG(duration_ms) as avg_ms FROM flow_log WHERE duration_ms IS NOT NULL GROUP BY to_state",
+      ).all() as { to_state: string; avg_ms: number }[];
+      const avg_duration_by_state: Record<string, number> = {};
+      for (const r of durationRows) avg_duration_by_state[r.to_state] = Math.round(r.avg_ms);
+
+      return { queue_depth: queue, by_state, by_priority, avg_duration_by_state, total_tasks: total, completed, failed };
+    } catch { return empty; }
+  }
+
+  /** Medic stats: stalled tasks, failure rates, recovery events */
+  getMedicStats(): {
+    stalled_tasks: { id: string; state: string; assigned_agent: string | null; updated_at: string }[];
+    high_error_tasks: { id: string; error_count: number; state: string }[];
+    reject_summary: { tactical: number; strategic: number };
+    recovery_events: { task_id: string; at: string; from_state: string; to_state: string; reason: string }[];
+  } {
+    const empty = { stalled_tasks: [], high_error_tasks: [], reject_summary: { tactical: 0, strategic: 0 }, recovery_events: [] };
+    if (!this.rdb) return empty;
+    try {
+      const stall_threshold = new Date(Date.now() - 120_000).toISOString();
+      const stalled = this.rdb.prepare(
+        "SELECT id, state, assigned_agent, updated_at FROM tasks WHERE state NOT IN ('DONE','FAILED','CANCELLED','PAUSED') AND updated_at < ? ORDER BY updated_at ASC LIMIT 10",
+      ).all(stall_threshold) as { id: string; state: string; assigned_agent: string | null; updated_at: string }[];
+
+      const highError = this.rdb.prepare(
+        "SELECT id, error_count, state FROM tasks WHERE error_count > 0 ORDER BY error_count DESC LIMIT 10",
+      ).all() as { id: string; error_count: number; state: string }[];
+
+      const rejectSums = this.rdb.prepare(
+        "SELECT COALESCE(SUM(reject_count_tactical),0) as tac, COALESCE(SUM(reject_count_strategic),0) as str FROM tasks",
+      ).get() as { tac: number; str: number };
+
+      const recoveryEvents = this.rdb.prepare(
+        "SELECT task_id, at, from_state, to_state, reason FROM flow_log WHERE reason LIKE '%retry%' OR reason LIKE '%reassign%' OR reason LIKE '%recover%' OR reason LIKE '%Medic%' ORDER BY at DESC LIMIT 10",
+      ).all() as { task_id: string; at: string; from_state: string; to_state: string; reason: string }[];
+
+      return {
+        stalled_tasks: stalled,
+        high_error_tasks: highError,
+        reject_summary: { tactical: rejectSums.tac, strategic: rejectSums.str },
+        recovery_events: recoveryEvents,
+      };
+    } catch { return empty; }
+  }
+
   // ─── Write Methods ────────────────────────────────────────
 
   setAgentConfigWrite(config: AgentConfig): void {
