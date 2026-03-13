@@ -145,6 +145,7 @@ export class HQ {
       override_skip_gate: 0,
       source_channel: message.channel,
       source_chat_id: message.chat_id,
+      source_message_id: message.id,
     });
 
     this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
@@ -320,6 +321,7 @@ export class HQ {
         updateTaskState(task.id, TS.FAILED as TaskState, role,
           `Failed after ${newErrorCount} consecutive errors: ${errorMsg}`);
         this.replyToSource(task, `[Task Failed] ${task.id}: ${errorMsg}`).catch(() => {});
+        this.markReactionTerminal(task, TS.FAILED);
         if (task.parent_id) {
           this.checkSubtaskCompletion(task.parent_id);
         }
@@ -347,6 +349,24 @@ export class HQ {
     }
   }
 
+  private static readonly TERMINAL_EMOJI: Record<string, string> = {
+    DONE: 'DONE',
+    FAILED: 'PETRIFIED',
+    CANCELLED: 'CrossMark',
+  };
+
+  /**
+   * Swap Typing → terminal emoji on the original message.
+   * Only call this when a task truly reaches terminal state.
+   */
+  private markReactionTerminal(task: Task, state: string): void {
+    if (task.source_channel && task.source_message_id) {
+      const emoji = HQ.TERMINAL_EMOJI[state] ?? 'DONE';
+      const channel = this.channels.getChannel(task.source_channel);
+      channel?.completeReaction?.(task.source_message_id, emoji).catch(() => {});
+    }
+  }
+
   // ─── Output Handlers ───────────────────────────────────────
 
   private async handleAdjutantOutput(task: Task, raw: string): Promise<void> {
@@ -358,6 +378,7 @@ export class HQ {
       transition(task.id, TS.SPLITTING, AR.ADJUTANT, 'Direct reply — short-circuit');
       await this.replyToSource(task, output.reply);
       transition(task.id, TS.DONE, AR.ADJUTANT, 'Adjutant handled directly');
+      this.markReactionTerminal(task, TS.DONE);
       logger.info({ taskId: task.id }, 'Short-circuit: adjutant replied directly, skipping pipeline');
       return;
     }
@@ -468,6 +489,7 @@ export class HQ {
         // Notify user that the task could not be completed
         const findings = output.findings.join('; ') || 'Task rejected';
         await this.replyToSource(task, findings);
+        this.markReactionTerminal(task, TS.FAILED);
       } else {
         // Re-enqueue for reprocessing
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
@@ -515,6 +537,7 @@ export class HQ {
       this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
     } else if (output.status === 'failed') {
       transition(task.id, TS.FAILED, AR.ENGINEER, `Execution failed: ${output.result}`);
+      this.markReactionTerminal(task, TS.FAILED);
     } else if (output.status === 'blocked') {
       const newErrorCount = (task.error_count ?? 0) + 1;
       updateTask(task.id, { error_count: newErrorCount });
@@ -522,6 +545,7 @@ export class HQ {
       if (newErrorCount >= MAX_TASK_ERRORS) {
         logger.error({ taskId: task.id, blockedCount: newErrorCount }, 'Engineer blocked too many times — failing');
         transition(task.id, TS.FAILED, AR.ENGINEER, `Blocked ${newErrorCount} times: ${output.result}`);
+        this.markReactionTerminal(task, TS.FAILED);
       } else {
         const backoffMs = Math.min(5000 * Math.pow(2, newErrorCount - 1), 120_000);
         logger.warn({ taskId: task.id, reason: output.result, attempt: newErrorCount, nextRetryMs: backoffMs }, 'Engineer blocked — backing off');
@@ -557,6 +581,7 @@ export class HQ {
       transition(parentId, TS.FAILED, AR.ADJUTANT, 'Subtask(s) failed');
       const failedDescs = subtasks.filter(st => st.state === TS.FAILED).map(st => st.description).join(', ');
       this.replyToSource(parent, `部分子任务失败: ${failedDescs}`).catch(() => {});
+      this.markReactionTerminal(parent, TS.FAILED);
       logger.info({ parentId }, 'Parent task failed — subtask(s) failed');
     } else {
       transition(parentId, TS.DELIVERING, AR.ADJUTANT, 'All subtasks completed');
@@ -580,6 +605,7 @@ export class HQ {
     }
 
     transition(task.id, TS.DONE, AR.ADJUTANT, 'Delivered');
+    this.markReactionDone(task);
   }
 
   /**

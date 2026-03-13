@@ -108,6 +108,43 @@ export async function sendLarkMessage(
   return data;
 }
 
+export async function addReaction(
+  token: string,
+  messageId: string,
+  emojiType: string,
+): Promise<string | null> {
+  const { data } = await larkRequest(
+    'POST',
+    `${LARK_BASE}/im/v1/messages/${messageId}/reactions`,
+    { reaction_type: { emoji_type: emojiType } },
+    token,
+  );
+
+  if (data.code !== 0) {
+    throw new Error(`Lark addReaction failed: code=${data.code} msg=${data.msg}`);
+  }
+
+  const reaction = data.data as Record<string, unknown> | undefined;
+  return (reaction?.reaction_id as string) ?? null;
+}
+
+export async function removeReaction(
+  token: string,
+  messageId: string,
+  reactionId: string,
+): Promise<void> {
+  const { data } = await larkRequest(
+    'DELETE',
+    `${LARK_BASE}/im/v1/messages/${messageId}/reactions/${reactionId}`,
+    undefined,
+    token,
+  );
+
+  if (data.code !== 0) {
+    throw new Error(`Lark removeReaction failed: code=${data.code} msg=${data.msg}`);
+  }
+}
+
 export async function getBotInfo(token: string): Promise<Record<string, unknown>> {
   const { data } = await larkRequest('GET', `${LARK_BASE}/bot/v3/info`, undefined, token);
   if (data.code !== 0) {
@@ -165,6 +202,9 @@ export class LarkChannel implements Channel {
   private inboundHandler: OnInboundMessage | null = null;
   private tokenManager: TokenManager | null = null;
   private botOpenId: string | null = null;
+
+  // Reaction tracking: messageId → reactionId (for removing Typing on completion)
+  private pendingReactions = new Map<string, string>();
 
   // Webhook state
   private server: http.Server | null = null;
@@ -230,6 +270,53 @@ export class LarkChannel implements Channel {
     logger.info({ chatId, receiveIdType, textLength: text.length }, 'Lark message sent');
   }
 
+  /**
+   * Add a Typing reaction to acknowledge receipt, then track it for later removal.
+   * Fire-and-forget — failures are logged but never block the pipeline.
+   */
+  private ackReaction(messageId: string): void {
+    if (!this.tokenManager) return;
+
+    this.tokenManager.getToken()
+      .then((token) => addReaction(token, messageId, 'Typing'))
+      .then((reactionId) => {
+        if (reactionId) {
+          this.pendingReactions.set(messageId, reactionId);
+        }
+        logger.debug({ messageId }, 'Lark: Typing reaction added');
+      })
+      .catch((err) => {
+        logger.warn({ messageId, error: err instanceof Error ? err.message : String(err) }, 'Lark: failed to add Typing reaction');
+      });
+  }
+
+  /**
+   * Remove the Typing reaction and add a DONE reaction when the task completes.
+   * Fire-and-forget — safe to call even if no pending reaction exists.
+   */
+  async completeReaction(messageId: string, emoji = 'DONE'): Promise<void> {
+    if (!this.tokenManager) return;
+
+    try {
+      const token = await this.tokenManager.getToken();
+
+      // Remove Typing
+      const reactionId = this.pendingReactions.get(messageId);
+      if (reactionId) {
+        this.pendingReactions.delete(messageId);
+        await removeReaction(token, messageId, reactionId).catch((err) => {
+          logger.debug({ messageId, error: err instanceof Error ? err.message : String(err) }, 'Lark: failed to remove Typing reaction (may already be removed)');
+        });
+      }
+
+      // Add terminal emoji
+      await addReaction(token, messageId, emoji);
+      logger.debug({ messageId, emoji }, 'Lark: terminal reaction added');
+    } catch (err) {
+      logger.warn({ messageId, error: err instanceof Error ? err.message : String(err) }, 'Lark: failed to complete reaction');
+    }
+  }
+
   isConnected(): boolean {
     return this.connected;
   }
@@ -256,6 +343,7 @@ export class LarkChannel implements Channel {
 
     this.connected = false;
     this.seenEvents.clear();
+    this.pendingReactions.clear();
     logger.info('Lark channel disconnected');
   }
 
@@ -456,6 +544,9 @@ export class LarkChannel implements Channel {
       { messageId: inbound.id, sender: inbound.sender, chatType },
       'Lark inbound message parsed',
     );
+
+    // Acknowledge receipt with a Typing reaction (fire-and-forget)
+    this.ackReaction(inbound.id);
 
     this.inboundHandler(inbound);
   }
