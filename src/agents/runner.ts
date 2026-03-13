@@ -1,18 +1,19 @@
 // ═══════════════════════════════════════════════════════════
-// ArmyClaw — Agent Execution Engine (Agentic Loop)
+// ArmyClaw — Agent Execution Engine
 //
-// Non-tool agents (adjutant, operations): single LLM call
-// Tool agents (engineer, chief_of_staff, inspector):
-//   call LLM → use tools → feed results back → repeat
-//   until LLM says "done" or max turns reached.
-//
-// This is the same pattern as Claude Code's sub-agents.
+// Three execution paths:
+// 1. Non-tool agents (adjutant, operations): single LLM call
+// 2. Tool agents (chief_of_staff, inspector, simple engineer):
+//    agentic loop — LLM → tools → repeat
+// 3. Claude Code engineers (moderate/complex):
+//    direct spawn — Claude Code IS the engineer
 // ═══════════════════════════════════════════════════════════
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 
-import { SOULS_DIR, TASKS_DIR, MAX_AGENT_TURNS } from '../config.js';
+import { SOULS_DIR, PROJECT_DIR, MAX_AGENT_TURNS, MAX_CONCURRENT_ENGINEERS, MAX_SUBTASKS_HARD_CAP, SUBTASK_SLOT_RESERVE, CLAUDE_CODE_TIMEOUT_MS } from '../config.js';
 import {
   getAgentConfig,
   recordAgentRun,
@@ -36,6 +37,8 @@ import { LLMClient } from '../arsenal/llm-client.js';
 import { Armory } from '../arsenal/armory.js';
 import type { ToolContext } from '../arsenal/armory.js';
 import { CostTracker } from '../depot/cost-tracker.js';
+import { getResponseTool } from './schemas.js';
+import { getSafeEnv } from '../arsenal/exec-provider.js';
 
 // ─── Agent Runner ────────────────────────────────────────────
 
@@ -97,11 +100,16 @@ export class AgentRunner {
       return this.singleCall(task, role, runId, systemPrompt, config, input);
     }
 
-    // Has tools → agentic loop (engineer, chief_of_staff, inspector)
+    // Engineer with moderate/complex → Claude Code direct (no agentic loop wrapper)
+    if (role === 'engineer' && task.complexity && task.complexity !== 'simple') {
+      return this.claudeCodeDirect(task, runId, input);
+    }
+
+    // Has tools → agentic loop (chief_of_staff, inspector, simple engineer)
     return this.agenticLoop(task, role, runId, systemPrompt, config, llmTools, input);
   }
 
-  // ─── Single Call (no tools) ─────────────────────────────────
+  // ─── Single Call (structured output via tool_use) ──────────────
 
   private async singleCall(
     task: Task,
@@ -111,6 +119,8 @@ export class AgentRunner {
     config: { model: string; temperature: number; max_tokens: number },
     input: string,
   ): Promise<string> {
+    const responseTool = getResponseTool(role);
+
     const request: LLMRequest = {
       model: config.model,
       system: systemPrompt,
@@ -119,10 +129,29 @@ export class AgentRunner {
       max_tokens: config.max_tokens,
     };
 
+    // Force structured output via tool_use when a response tool is defined
+    if (responseTool) {
+      request.tools = [responseTool];
+      request.tool_choice = { type: 'tool', name: responseTool.name };
+    }
+
     try {
       const response = await this.costTracker.trackCall(
         task.id, role, () => this.llm.call(request),
       );
+
+      // Extract structured output from tool_use block
+      if (responseTool && response.tool_use?.length) {
+        this.recordSuccess(task, role, runId, response);
+        return JSON.stringify(response.tool_use[0].input);
+      }
+
+      // Fallback: raw text (no response tool or tool_use not returned)
+      if (response.stop_reason === 'max_tokens') {
+        throw new Error(
+          `Agent ${role} output truncated (hit max_tokens ${config.max_tokens}).`,
+        );
+      }
 
       this.recordSuccess(task, role, runId, response);
       return response.content;
@@ -130,6 +159,135 @@ export class AgentRunner {
       this.recordError(task, role, runId, err);
       throw err;
     }
+  }
+
+  // ─── Claude Code Direct (engineer: moderate/complex) ──────
+
+  private async claudeCodeDirect(
+    task: Task,
+    runId: number,
+    input: string,
+  ): Promise<string> {
+    const workDir = task.artifacts_path || PROJECT_DIR;
+
+    writeProgressLog({
+      task_id: task.id,
+      at: new Date().toISOString(),
+      agent: 'engineer',
+      text: `Claude Code direct: spawning for ${task.complexity} task`,
+      todos: null,
+    });
+
+    try {
+      const result = await this.spawnClaude(input, workDir);
+
+      const output = result.stdout.trim();
+      const maxLen = 50_000;
+      const truncated = output.length > maxLen
+        ? output.slice(0, maxLen) + `\n... (truncated, ${output.length} chars total)`
+        : output;
+
+      const engineerResult = JSON.stringify({
+        subtask_id: task.id,
+        status: result.code === 0 ? 'completed' : 'failed',
+        result: truncated || '(no output)',
+        files_changed: [],
+      });
+
+      // Record success
+      const finishedAt = new Date().toISOString();
+      updateAgentRun(runId, {
+        status: result.code === 0 ? 'success' : 'error',
+        finished_at: finishedAt,
+        input_tokens: 0, // Claude Code manages its own token usage
+        output_tokens: 0,
+        error: result.code !== 0 ? `exit code ${result.code}` : null,
+      });
+
+      writeProgressLog({
+        task_id: task.id,
+        at: finishedAt,
+        agent: 'engineer',
+        text: `Claude Code direct: ${result.code === 0 ? 'completed' : 'failed (exit ' + result.code + ')'}`,
+        todos: null,
+      });
+
+      logger.info(
+        { taskId: task.id, runId, exitCode: result.code },
+        'Claude Code direct completed',
+      );
+
+      return engineerResult;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const finishedAt = new Date().toISOString();
+
+      updateAgentRun(runId, {
+        status: 'error',
+        finished_at: finishedAt,
+        error: errorMsg,
+      });
+
+      writeProgressLog({
+        task_id: task.id,
+        at: finishedAt,
+        agent: 'engineer',
+        text: `Claude Code direct failed: ${errorMsg}`,
+        todos: null,
+      });
+
+      return JSON.stringify({
+        subtask_id: task.id,
+        status: 'failed',
+        result: errorMsg,
+      });
+    }
+  }
+
+  private spawnClaude(prompt: string, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn('claude', ['-p', '--verbose'], {
+        cwd,
+        env: getSafeEnv(true),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      const chunks: Buffer[] = [];
+      const errChunks: Buffer[] = [];
+      let settled = false;
+
+      child.stdout.on('data', (data: Buffer) => chunks.push(data));
+      child.stderr.on('data', (data: Buffer) => errChunks.push(data));
+
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          stdout: Buffer.concat(chunks).toString('utf-8'),
+          stderr: Buffer.concat(errChunks).toString('utf-8'),
+          code,
+        });
+      });
+
+      child.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
+
+      child.stdin.write(prompt);
+      child.stdin.end();
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 5_000);
+        reject(new Error(`Claude Code timed out after ${CLAUDE_CODE_TIMEOUT_MS}ms`));
+      }, CLAUDE_CODE_TIMEOUT_MS);
+
+      child.on('close', () => clearTimeout(timer));
+    });
   }
 
   // ─── Agentic Loop (with tools) ─────────────────────────────
@@ -143,9 +301,8 @@ export class AgentRunner {
     llmTools: import('../types.js').LLMTool[],
     input: string,
   ): Promise<string> {
-    // Build tool execution context (single workDir)
-    const workDir = task.artifacts_path || path.join(TASKS_DIR, task.id);
-    fs.mkdirSync(workDir, { recursive: true });
+    // Build tool execution context — use project root when no artifacts_path
+    const workDir = task.artifacts_path || PROJECT_DIR;
     const toolContext: ToolContext = {
       taskId: task.id,
       workDir,
@@ -382,12 +539,8 @@ export class AgentRunner {
       // DB not available
     }
 
-    if (task.artifacts_path) {
-      sections.push(`## Working Directory\nPath: ${task.artifacts_path}`);
-    } else {
-      const defaultPath = path.join(TASKS_DIR, task.id);
-      sections.push(`## Working Directory\nPath: ${defaultPath}`);
-    }
+    const ctxWorkDir = task.artifacts_path || PROJECT_DIR;
+    sections.push(`## Working Directory\nPath: ${ctxWorkDir}`);
 
     if (task.context_chain) {
       try {
@@ -403,6 +556,17 @@ export class AgentRunner {
       } catch {
         // Invalid context_chain JSON
       }
+    }
+
+    // Tell Operations the exact subtask limit so it plans accordingly
+    if (role === 'operations') {
+      const maxSubs = Math.min(MAX_CONCURRENT_ENGINEERS, MAX_SUBTASKS_HARD_CAP) - SUBTASK_SLOT_RESERVE;
+      sections.push([
+        '## Resource Constraint',
+        `You have **${maxSubs} engineer slots** available. You MUST create at most ${maxSubs} assignments.`,
+        'If the work requires more subtasks than slots, merge related work into fewer, broader assignments.',
+        'Do NOT create more assignments than the limit — excess ones will be dropped.',
+      ].join('\n'));
     }
 
     const ctxToolNames = this.armory.getToolNamesForRole(role);

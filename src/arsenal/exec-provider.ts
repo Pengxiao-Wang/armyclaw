@@ -4,7 +4,8 @@
 // No file operations, no path safety model.
 // ═══════════════════════════════════════════════════════════
 
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
 import { TOOL_EXEC_TIMEOUT_MS } from '../config.js';
 import type { LLMTool, ToolUseBlock, ToolResultBlock } from '../types.js';
@@ -73,15 +74,18 @@ export class ExecProvider implements ToolProvider {
         ? Math.min((block.input as { timeout_ms?: number }).timeout_ms ?? TOOL_EXEC_TIMEOUT_MS, TOOL_EXEC_TIMEOUT_MS)
         : TOOL_EXEC_TIMEOUT_MS;
 
+    const execAsync = promisify(exec);
+
     try {
-      const output = execSync(cmd, {
+      const { stdout, stderr } = await execAsync(cmd, {
         encoding: 'utf-8',
         timeout,
         cwd: context.workDir,
         maxBuffer: 1024 * 1024,
         env: getSafeEnv(false),
-      }).trim();
+      });
 
+      const output = (stdout ?? '').trim();
       const maxLen = 10_000;
       const content =
         output.length > maxLen

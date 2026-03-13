@@ -192,13 +192,19 @@ export class Armory {
     }
 
     for (const serverConfig of config.mcp_servers) {
+      // Resolve "." in args to projectDir (absolute path)
+      const resolvedConfig = {
+        ...serverConfig,
+        args: serverConfig.args.map((a) => (a === '.' ? this.projectDir : a)),
+      };
+
       const breaker = new CircuitBreaker(
         CIRCUIT_BREAKER_FAILURE_THRESHOLD,
         CIRCUIT_BREAKER_RESET_TIMEOUT_MS,
         CIRCUIT_BREAKER_HALF_OPEN_MAX,
       );
 
-      const provider = new MCPToolProvider(serverConfig, breaker);
+      const provider = new MCPToolProvider(resolvedConfig, breaker);
 
       try {
         await provider.connect();

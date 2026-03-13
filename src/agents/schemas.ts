@@ -48,7 +48,7 @@ export const OperationsOutputSchema = z.object({
     subtask_id: z.string(),
     context: z.string(),
     complexity: z.enum(['simple', 'moderate', 'complex']),
-  })),
+  })).max(8),
 });
 
 export const EngineerOutputSchema = z.object({
@@ -57,6 +57,73 @@ export const EngineerOutputSchema = z.object({
   result: z.string(),
   files_changed: z.array(z.string()).optional(),
 });
+
+// ─── Response Tools (structured output via tool_use) ────────────
+
+import type { LLMTool, AgentRole } from '../types.js';
+
+const ADJUTANT_RESPONSE_TOOL: LLMTool = {
+  name: 'respond',
+  description: 'Submit your classification and response for this message.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      direct_reply: { type: 'boolean', description: 'true = you handle it directly; false = forward to pipeline' },
+      tasks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            description: { type: 'string' },
+            priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
+          },
+          required: ['id', 'description', 'priority'],
+        },
+      },
+      reply: { type: 'string', description: 'Brief acknowledgment or direct reply to user' },
+    },
+    required: ['direct_reply', 'tasks', 'reply'],
+  },
+};
+
+const OPERATIONS_RESPONSE_TOOL: LLMTool = {
+  name: 'respond',
+  description: 'Submit your task assignments for engineers.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      assignments: {
+        type: 'array',
+        maxItems: 8,
+        items: {
+          type: 'object',
+          properties: {
+            engineer_id: { type: 'string' },
+            subtask_id: { type: 'string' },
+            context: { type: 'string' },
+            complexity: { type: 'string', enum: ['simple', 'moderate', 'complex'] },
+          },
+          required: ['engineer_id', 'subtask_id', 'context', 'complexity'],
+        },
+      },
+    },
+    required: ['assignments'],
+  },
+};
+
+const RESPONSE_TOOLS: Partial<Record<AgentRole, LLMTool>> = {
+  adjutant: ADJUTANT_RESPONSE_TOOL,
+  operations: OPERATIONS_RESPONSE_TOOL,
+};
+
+/**
+ * Get the response tool for a role (if it uses structured output via tool_use).
+ * Only singleCall roles (adjutant, operations) have response tools.
+ */
+export function getResponseTool(role: AgentRole): LLMTool | undefined {
+  return RESPONSE_TOOLS[role];
+}
 
 // ─── Parser ─────────────────────────────────────────────────────
 

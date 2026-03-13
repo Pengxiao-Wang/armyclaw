@@ -88,6 +88,7 @@ export interface Task {
   source_channel: string | null;
   source_chat_id: string | null;
   source_message_id: string | null;
+  complexity: 'simple' | 'moderate' | 'complex' | null;
   context_chain: string | null;
   created_at: string;
   updated_at: string;
@@ -264,6 +265,7 @@ export interface LLMRequest {
   system: string;
   messages: LLMMessage[];
   tools?: LLMTool[];
+  tool_choice?: { type: 'any' } | { type: 'tool'; name: string };
   max_tokens?: number;
   temperature?: number;
 }

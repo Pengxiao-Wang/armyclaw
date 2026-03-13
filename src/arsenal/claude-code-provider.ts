@@ -2,9 +2,10 @@
 // ArmyClaw — Claude Code Tool Provider
 // Delegates coding tasks to Claude Code CLI.
 // cwd is fixed to workDir so Claude Code sees the project.
+// Uses async spawn to avoid blocking the event loop.
 // ═══════════════════════════════════════════════════════════
 
-import { execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 
 import { CLAUDE_CODE_TIMEOUT_MS } from '../config.js';
 import type { LLMTool, ToolUseBlock, ToolResultBlock } from '../types.js';
@@ -28,6 +29,56 @@ const CLAUDE_CODE_TOOL: LLMTool = {
   },
 };
 
+// ─── Async Claude Code execution ──────────────────────────
+
+function runClaude(prompt: string, cwd: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('claude', ['-p', '--verbose'], {
+      cwd,
+      env: getSafeEnv(true),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let settled = false;
+
+    child.stdout.on('data', (data: Buffer) => chunks.push(data));
+    child.stderr.on('data', (data: Buffer) => errChunks.push(data));
+
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        stdout: Buffer.concat(chunks).toString('utf-8'),
+        stderr: Buffer.concat(errChunks).toString('utf-8'),
+        code,
+      });
+    });
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+
+    // Write prompt to stdin and close
+    child.stdin.write(prompt);
+    child.stdin.end();
+
+    // Timeout guard
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 5_000);
+      reject(new Error(`Claude Code timed out after ${CLAUDE_CODE_TIMEOUT_MS}ms`));
+    }, CLAUDE_CODE_TIMEOUT_MS);
+
+    child.on('close', () => clearTimeout(timer));
+  });
+}
+
 // ─── Provider ──────────────────────────────────────────────
 
 export class ClaudeCodeProvider implements ToolProvider {
@@ -41,15 +92,19 @@ export class ClaudeCodeProvider implements ToolProvider {
     const input = block.input as { prompt: string };
 
     try {
-      const output = execFileSync('claude', ['-p', '--verbose'], {
-        input: input.prompt,
-        encoding: 'utf-8',
-        timeout: CLAUDE_CODE_TIMEOUT_MS,
-        cwd: context.workDir,
-        maxBuffer: 5 * 1024 * 1024, // 5MB
-        env: getSafeEnv(true),
-      }).trim();
+      const result = await runClaude(input.prompt, context.workDir);
 
+      if (result.code !== 0 && result.code !== null) {
+        const combined = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n');
+        return {
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: combined || `Claude Code exited with code ${result.code}`,
+          is_error: true,
+        };
+      }
+
+      const output = result.stdout.trim();
       const maxLen = 50_000;
       if (output.length > maxLen) {
         return {
@@ -67,15 +122,11 @@ export class ClaudeCodeProvider implements ToolProvider {
         is_error: false,
       };
     } catch (err: unknown) {
-      const execErr = err as { status?: number; stdout?: string; stderr?: string; message?: string };
-      const stderr = execErr.stderr?.trim() ?? '';
-      const stdout = execErr.stdout?.trim() ?? '';
-      const combined = [stdout, stderr].filter(Boolean).join('\n');
-
+      const message = err instanceof Error ? err.message : String(err);
       return {
         type: 'tool_result',
         tool_use_id: block.id,
-        content: combined || execErr.message || 'Claude Code execution failed',
+        content: message,
         is_error: true,
       };
     }

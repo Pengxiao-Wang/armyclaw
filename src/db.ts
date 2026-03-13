@@ -41,6 +41,7 @@ function createSchema(database: Database.Database): void {
       source_channel TEXT,
       source_chat_id TEXT,
       source_message_id TEXT,
+      complexity TEXT,
       context_chain TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -160,12 +161,13 @@ export function _initTestDatabase(): void {
 // ─── Tasks ──────────────────────────────────────────────────────
 
 export function createTask(
-  task: Omit<Task, 'created_at' | 'updated_at' | 'context_chain' | 'error_count' | 'source_message_id'> & {
+  task: Omit<Task, 'created_at' | 'updated_at' | 'context_chain' | 'error_count' | 'source_message_id' | 'complexity'> & {
     created_at?: string;
     updated_at?: string;
     context_chain?: string | null;
     source_message_id?: string | null;
     error_count?: number;
+    complexity?: 'simple' | 'moderate' | 'complex' | null;
   },
 ): Task {
   const now = new Date().toISOString();
@@ -188,6 +190,7 @@ export function createTask(
     source_channel: task.source_channel ?? null,
     source_chat_id: task.source_chat_id ?? null,
     source_message_id: task.source_message_id ?? null,
+    complexity: task.complexity ?? null,
     context_chain: task.context_chain ?? null,
     created_at: task.created_at ?? now,
     updated_at: task.updated_at ?? now,
@@ -195,14 +198,14 @@ export function createTask(
 
   const insertTaskTxn = db.transaction(() => {
     db.prepare(`
-      INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, error_count, override_skip_gate, source_channel, source_chat_id, source_message_id, context_chain, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, parent_id, campaign_id, state, description, priority, assigned_agent, assigned_engineer_id, intent_type, reject_count_tactical, reject_count_strategic, rubric, artifacts_path, error_count, override_skip_gate, source_channel, source_chat_id, source_message_id, complexity, context_chain, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id, row.parent_id, row.campaign_id, row.state, row.description, row.priority,
       row.assigned_agent, row.assigned_engineer_id, row.intent_type,
       row.reject_count_tactical, row.reject_count_strategic,
       row.rubric, row.artifacts_path, row.error_count, row.override_skip_gate,
-      row.source_channel, row.source_chat_id, row.source_message_id, row.context_chain,
+      row.source_channel, row.source_chat_id, row.source_message_id, row.complexity, row.context_chain,
       row.created_at, row.updated_at,
     );
 
