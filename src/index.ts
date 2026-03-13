@@ -27,9 +27,12 @@ import {
 } from './agents/schemas.js';
 import { CredentialProxy } from './arsenal/credential-proxy.js';
 import { LLMClient } from './arsenal/llm-client.js';
+import { Armory } from './arsenal/armory.js';
+import { ExecProvider } from './arsenal/exec-provider.js';
+import { ClaudeCodeProvider } from './arsenal/claude-code-provider.js';
 import { Medic } from './medic/self-repair.js';
 import { CostTracker } from './depot/cost-tracker.js';
-import { MAX_TASK_ERRORS } from './config.js';
+import { MAX_TASK_ERRORS, PROJECT_DIR } from './config.js';
 import { TaskQueue, QueuePriority } from './herald/queue.js';
 import { routeTask, shouldSkipPlanning } from './herald/router.js';
 import { transition, routeReject, setTerminalHook } from './herald/state-machine.js';
@@ -54,6 +57,7 @@ export class HQ {
   private channels = new ChannelRegistry();
   private credentials = new CredentialProxy();
   private llm = new LLMClient();
+  private armory = new Armory(PROJECT_DIR);
   private medic = new Medic();
   private costTracker = new CostTracker();
   private runner: AgentRunner;
@@ -64,12 +68,17 @@ export class HQ {
   private pendingRetries: { taskId: string; readyAt: number; priority: QueuePriority }[] = [];
 
   constructor() {
-    this.runner = new AgentRunner(this.llm, this.costTracker);
+    this.runner = new AgentRunner(this.llm, this.costTracker, this.armory);
   }
 
   async start(): Promise<void> {
     logger.info('HQ (指挥所) starting...');
     initDatabase();
+
+    // Initialize Armory — loads MCP servers from armory.json + registers built-in providers
+    this.armory.registerProvider(new ExecProvider());
+    this.armory.registerProvider(new ClaudeCodeProvider());
+    await this.armory.initialize();
 
     // Load API credentials
     this.credentials.loadFromEnv();
@@ -104,6 +113,7 @@ export class HQ {
     }
     this.queue.shutdown();
     this.medic.stop();
+    await this.armory.shutdown();
     await this.channels.disconnectAll();
     logger.info('HQ (指挥所) shutdown');
   }

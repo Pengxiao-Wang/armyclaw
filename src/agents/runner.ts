@@ -33,9 +33,9 @@ import type {
   ToolUseBlock,
 } from '../types.js';
 import { LLMClient } from '../arsenal/llm-client.js';
+import { Armory } from '../arsenal/armory.js';
+import type { ToolContext } from '../arsenal/armory.js';
 import { CostTracker } from '../depot/cost-tracker.js';
-import { getToolsForRole, getLLMToolsForRole } from './tools.js';
-import { ToolExecutor } from './tool-executor.js';
 
 // ─── Agent Runner ────────────────────────────────────────────
 
@@ -43,6 +43,7 @@ export class AgentRunner {
   constructor(
     private llm: LLMClient,
     private costTracker: CostTracker,
+    private armory: Armory,
   ) {}
 
   /**
@@ -57,8 +58,8 @@ export class AgentRunner {
   async runAgent(task: Task, role: AgentRole, input: string): Promise<string> {
     const soul = this.loadSoul(role);
     const config = getAgentConfig(role);
-    const toolNames = getToolsForRole(role);
-    const llmTools = getLLMToolsForRole(role);
+    const toolNames = this.armory.getToolNamesForRole(role);
+    const llmTools = this.armory.getToolsForRole(role);
     const context = this.buildContext(task, role);
     const systemPrompt = [soul, context].join('\n\n---\n\n');
 
@@ -142,9 +143,14 @@ export class AgentRunner {
     llmTools: import('../types.js').LLMTool[],
     input: string,
   ): Promise<string> {
-    // Set up working directory for tool execution
+    // Build tool execution context (single workDir)
     const workDir = task.artifacts_path || path.join(TASKS_DIR, task.id);
-    const executor = new ToolExecutor(workDir);
+    fs.mkdirSync(workDir, { recursive: true });
+    const toolContext: ToolContext = {
+      taskId: task.id,
+      workDir,
+      role,
+    };
 
     // Conversation history for the loop
     const messages: LLMMessage[] = [
@@ -225,7 +231,7 @@ export class AgentRunner {
             'Executing tool',
           );
 
-          const result = executor.execute(toolUse);
+          const result = await this.armory.execute(toolUse, toolContext);
           toolResults.push(result);
 
           writeProgressLog({
@@ -399,12 +405,12 @@ export class AgentRunner {
       }
     }
 
-    const toolNames = getToolsForRole(role);
-    if (toolNames.length > 0) {
+    const ctxToolNames = this.armory.getToolNamesForRole(role);
+    if (ctxToolNames.length > 0) {
       sections.push([
         '## Available Tools',
         'You can use these tools iteratively. Read files, make changes, run tests, fix issues — repeat until done.',
-        ...toolNames.map((t) => `- ${t}`),
+        ...ctxToolNames.map((t) => `- ${t}`),
       ].join('\n'));
     }
 

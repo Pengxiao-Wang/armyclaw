@@ -1,0 +1,10 @@
+{
+  "mcp_servers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "path_prefix": true
+    }
+  ]
+}
