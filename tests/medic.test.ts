@@ -7,6 +7,7 @@ vi.mock('../src/db.js', () => ({
   getTaskById: vi.fn(),
   updateTask: vi.fn(),
   updateTaskState: vi.fn(),
+  updateAgentRun: vi.fn(),
   writeFlowLog: vi.fn(),
 }));
 

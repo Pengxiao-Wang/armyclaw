@@ -343,7 +343,7 @@ describe('Agent Config', () => {
   it('should return defaults when not configured', () => {
     const config = getAgentConfig(AgentRole.ENGINEER);
     expect(config.role).toBe('engineer');
-    expect(config.model).toBe('claude-opus-4-20250514');
+    expect(config.model).toBe('claude-opus-4-6');
     expect(config.provider).toBe('anthropic');
   });
 

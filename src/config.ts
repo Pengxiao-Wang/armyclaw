@@ -16,11 +16,11 @@ export const SUBTASK_SLOT_RESERVE = 1; // reserve slot(s) for new task responsiv
 
 // LLM defaults
 export const DEFAULT_MODELS: Record<AgentRole, string> = {
-  adjutant: 'claude-sonnet-4-20250514',
-  chief_of_staff: 'claude-opus-4-20250514',
-  operations: 'claude-sonnet-4-20250514',
-  inspector: 'claude-opus-4-20250514',
-  engineer: 'claude-opus-4-20250514',
+  adjutant: 'claude-haiku-4-5-20251001',
+  chief_of_staff: 'claude-opus-4-6',
+  operations: 'claude-sonnet-4-6',
+  inspector: 'claude-opus-4-6',
+  engineer: 'claude-opus-4-6',
 };
 
 export const DEFAULT_PROVIDER = 'anthropic';

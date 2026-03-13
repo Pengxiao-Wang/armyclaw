@@ -745,9 +745,11 @@ function getSandTableHTML(): string {
         <div id="model-config">
           <select id="cfg-role-select"></select>
           <select id="cfg-model-select">
-            <option value="claude-opus-4-20250514">claude-opus-4</option>
-            <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
-            <option value="claude-haiku-4-5-20251001">claude-haiku-4.5</option>
+            <option value="claude-opus-4-6">Claude Opus 4.6</option>
+            <option value="claude-opus-4-20250514">Claude Opus 4</option>
+            <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
+            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+            <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
           </select>
           <button class="btn" onclick="updateAgentConfig()" data-i18n="btn_deploy">DEPLOY</button>
         </div>

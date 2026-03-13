@@ -76,10 +76,18 @@ export class Medic {
           'Stalled task detected',
         );
 
-        const action = this.determineRecovery(run, failureCount);
+        // Mark the stalled run as error so it won't trigger again next scan
+        const { updateAgentRun } = await import('../db.js');
+        updateAgentRun(run.id!, {
+          status: 'error',
+          finished_at: new Date().toISOString(),
+          error: `medic: stalled for ${Math.round(stalledMs / 1000)}s`,
+        });
+
+        const action = this.determineRecovery(run, failureCount + 1);
 
         logger.info(
-          { taskId: run.task_id, action, failureCount },
+          { taskId: run.task_id, action, failureCount: failureCount + 1 },
           'Executing recovery action',
         );
 

@@ -98,9 +98,10 @@ export class HQ {
     this.channels.setMessageHandler(this.handleInbound.bind(this));
     await this.channels.connectAll();
 
-    // Start main loop
+    // Start continuous worker model
     this.running = true;
-    this.processLoop();
+    this.drainQueue();
+    this.loopTimer = setInterval(() => this.drainQueue(), 1000);
 
     logger.info('HQ (指挥所) ready');
   }
@@ -108,7 +109,7 @@ export class HQ {
   async stop(): Promise<void> {
     this.running = false;
     if (this.loopTimer) {
-      clearTimeout(this.loopTimer);
+      clearInterval(this.loopTimer);
       this.loopTimer = null;
     }
     this.queue.shutdown();
@@ -149,73 +150,58 @@ export class HQ {
     });
 
     this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
+    this.drainQueue();
 
     logger.info({ taskId: task.id }, 'Task created from inbound message');
   }
 
   /**
-   * Main processing loop. Dequeues tasks and processes them.
+   * Drain the queue: start a processOne() for each dequeueable task.
+   * Non-blocking — each task runs independently, no batch barrier.
    */
-  private processLoop(): void {
+  private drainQueue(): void {
     if (!this.running) return;
 
-    const processBatch = async () => {
-      if (!this.running) return;
+    this.flushPendingRetries();
 
-      // Flush pending retries whose backoff has expired
-      this.flushPendingRetries();
+    while (true) {
+      const taskId = this.queue.dequeue();
+      if (!taskId) break;
+      this.processOne(taskId);
+    }
+  }
 
-      // Dequeue up to maxConcurrent tasks (queue.dequeue respects the limit)
-      const taskPromises: Promise<void>[] = [];
+  /**
+   * Process a single task through one pipeline step, then re-drain.
+   * Each task is fully independent — completes and immediately frees its slot.
+   */
+  private async processOne(taskId: string): Promise<void> {
+    let hadError = false;
+    try {
+      const task = getTaskById(taskId);
+      if (task) {
+        await this.processTask(task);
+      }
+    } catch (err) {
+      hadError = true;
+      logger.error(
+        { taskId, error: err instanceof Error ? err.message : String(err) },
+        'Task processing failed (outer)',
+      );
+    } finally {
+      this.queue.complete(taskId);
 
-      while (true) {
-        const taskId = this.queue.dequeue();
-        if (!taskId) break;
-
-        taskPromises.push(
-          (async () => {
-            let hadError = false;
-            try {
-              const task = getTaskById(taskId);
-              if (task) {
-                await this.processTask(task);
-              }
-            } catch (err) {
-              hadError = true;
-              // Error handling is done inside processTask's catch block.
-              // This outer catch is a safety net for unexpected errors.
-              logger.error(
-                { taskId, error: err instanceof Error ? err.message : String(err) },
-                'Task processing failed (outer)',
-              );
-            } finally {
-              // Must complete before re-enqueue — enqueue() skips active tasks
-              this.queue.complete(taskId);
-
-              // Only re-enqueue on success. On error, processTask handles retry scheduling.
-              if (!hadError) {
-                const updated = getTaskById(taskId);
-                const terminal: string[] = [TS.DONE, TS.FAILED, TS.CANCELLED, TS.PAUSED, TS.EXECUTING];
-                if (updated && !terminal.includes(updated.state)) {
-                  this.queue.enqueue(taskId, QueuePriority.NEW_TASK);
-                }
-              }
-            }
-          })(),
-        );
+      if (!hadError) {
+        const updated = getTaskById(taskId);
+        const terminal: string[] = [TS.DONE, TS.FAILED, TS.CANCELLED, TS.PAUSED, TS.EXECUTING];
+        if (updated && !terminal.includes(updated.state)) {
+          this.queue.enqueue(taskId, QueuePriority.NEW_TASK);
+        }
       }
 
-      if (taskPromises.length > 0) {
-        await Promise.allSettled(taskPromises);
-      }
-
-      // Schedule next iteration
-      this.loopTimer = setTimeout(() => {
-        this.processLoop();
-      }, this.queue.getQueueLength() > 0 ? 100 : 1000);
-    };
-
-    processBatch();
+      // Immediately try to fill freed slot — zero delay
+      this.drainQueue();
+    }
   }
 
   /**
@@ -610,6 +596,7 @@ export class HQ {
     } else {
       transition(parentId, TS.DELIVERING, AR.ADJUTANT, 'All subtasks completed');
       this.queue.enqueue(parentId, QueuePriority.NEW_TASK);
+      this.drainQueue();
       logger.info({ parentId }, 'Parent task ready for delivery — all subtasks completed');
     }
   }
