@@ -430,24 +430,77 @@ export class HQ {
 
     switch (output.type) {
       case IntentType.ANSWER:
-        // Direct answer — answer is in context_chain, will be delivered by adjutant after review
-        transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, 'Direct answer — skipping to review');
-        this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
+        // Fast path: direct answer — skip gate review, deliver immediately
+        transition(task.id, TS.DELIVERING, AR.CHIEF_OF_STAFF, 'Direct answer — fast path');
+        this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
         break;
 
       case IntentType.RESEARCH:
-      case IntentType.EXECUTION:
-        // Needs execution — go to gate1 review
-        transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, `Plan created (${output.type})`);
-        this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
+      case IntentType.EXECUTION: {
+        const complexity = output.plan?.complexity ?? 'complex';
+        const steps = output.plan?.steps ?? [];
+        updateTask(task.id, { complexity });
+
+        if (complexity === 'simple') {
+          if (steps.length <= 1) {
+            // FP-1 + FP-2: skip gate1 + inline dispatch (no Operations LLM)
+            this.inlineDispatch(task, steps[0]?.description ?? task.description);
+          } else {
+            // FP-1: skip gate1, still need Operations for multi-step
+            transition(task.id, TS.DISPATCHING, AR.CHIEF_OF_STAFF, 'Simple plan — skip gate1');
+            this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
+          }
+        } else {
+          // Standard: full gate review
+          transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, `Plan created (${output.type})`);
+          this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
+        }
         break;
+      }
 
       case IntentType.CAMPAIGN:
-        // Multi-phase campaign — handled separately
+        // Campaign always gets full review
         transition(task.id, TS.GATE1_REVIEW, AR.CHIEF_OF_STAFF, 'Campaign plan created');
         this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
         break;
     }
+  }
+
+  /**
+   * FP-2: Inline dispatch for single-step simple tasks.
+   * Creates subtask directly without calling Operations LLM.
+   */
+  private inlineDispatch(task: Task, description: string): void {
+    const subtaskId = `sub-${randomUUID().slice(0, 8)}`;
+    const engineerId = `eng-${randomUUID().slice(0, 4)}`;
+
+    createTask({
+      id: subtaskId,
+      parent_id: task.id,
+      campaign_id: task.campaign_id,
+      state: TS.EXECUTING,
+      description,
+      priority: task.priority,
+      assigned_agent: AR.ENGINEER,
+      assigned_engineer_id: engineerId,
+      intent_type: 'execution',
+      reject_count_tactical: 0,
+      reject_count_strategic: 0,
+      rubric: null,
+      artifacts_path: null,
+      override_skip_gate: 0,
+      source_channel: task.source_channel,
+      source_chat_id: task.source_chat_id,
+      complexity: 'simple',
+    });
+
+    this.queue.enqueue(subtaskId, QueuePriority.EXECUTING);
+    transition(task.id, TS.EXECUTING, AR.CHIEF_OF_STAFF, 'Single-step simple — inline dispatch');
+
+    logger.info(
+      { taskId: task.id, subtaskId },
+      'Fast path: inline dispatch (skip gate1 + operations)',
+    );
   }
 
   private async handleInspectorOutput(task: Task, raw: string): Promise<void> {
@@ -461,12 +514,8 @@ export class HQ {
 
     if (output.verdict === 'approve') {
       if (task.state === TS.GATE1_REVIEW) {
-        // ANSWER type already replied — skip dispatching, go straight to delivery
-        if (task.intent_type === IntentType.ANSWER) {
-          transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 1 approved (direct answer)');
-        } else {
-          transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
-        }
+        // Only moderate/complex/campaign tasks reach GATE1 now (simple skips it)
+        transition(task.id, TS.DISPATCHING, AR.INSPECTOR, 'Gate 1 approved');
         this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
       } else if (task.state === TS.GATE2_REVIEW) {
         transition(task.id, TS.DELIVERING, AR.INSPECTOR, 'Gate 2 approved');
@@ -535,8 +584,14 @@ export class HQ {
     appendContextChain(task.id, AR.ENGINEER, raw);
 
     if (output.status === 'completed') {
-      transition(task.id, TS.GATE2_REVIEW, AR.ENGINEER, 'Execution completed');
-      this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
+      if (task.complexity === 'simple') {
+        // FP-3: simple tasks skip gate2 — deliver directly
+        transition(task.id, TS.DELIVERING, AR.ENGINEER, 'Simple task — skip gate2');
+        this.queue.enqueue(task.id, QueuePriority.NEW_TASK);
+      } else {
+        transition(task.id, TS.GATE2_REVIEW, AR.ENGINEER, 'Execution completed');
+        this.queue.enqueue(task.id, QueuePriority.GATE_REVIEW);
+      }
     } else if (output.status === 'failed') {
       transition(task.id, TS.FAILED, AR.ENGINEER, `Execution failed: ${output.result}`);
       this.markReactionTerminal(task, TS.FAILED);
