@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AgentRunner } from '../src/agents/runner.js';
-import { LLMClient } from '../src/arsenal/llm-client.js';
-import { Armory } from '../src/arsenal/armory.js';
-import { CostTracker } from '../src/depot/cost-tracker.js';
-import type { Task, LLMResponse, LLMTool, AgentRole } from '../src/types.js';
+import { AgentRunner } from '../src/orchestration/agents/runner.js';
+import { LLMClient } from '../src/orchestration/arsenal.js';
+import { CostTracker } from '../src/orchestration/depot.js';
+import type { Task, LLMResponse, AgentRole } from '../src/types.js';
 
 // ─── Mocks ──────────────────────────────────────────────────
 
-vi.mock('../src/db.js', () => ({
+vi.mock('../src/kernel/db.js', () => ({
   getAgentConfig: vi.fn((role: AgentRole) => ({
     role,
     model: 'claude-sonnet-4-20250514',
@@ -37,12 +36,29 @@ vi.mock('fs', () => ({
     readFileSync: vi.fn((path: string) => {
       if (path.includes('adjutant')) return '# SOUL: Adjutant\nYou are the adjutant.';
       if (path.includes('chief_of_staff')) return '# SOUL: Chief of Staff\nYou are the chief of staff.';
+      if (path.includes('inspector')) return '# SOUL: Inspector\nYou are the inspector.';
       if (path.includes('engineer')) return '# SOUL: Engineer\nYou are the engineer.';
       throw new Error(`ENOENT: no such file: ${path}`);
     }),
     mkdirSync: vi.fn(),
     existsSync: vi.fn(() => false),
   },
+}));
+
+vi.mock('../src/kernel/process-runner.js', () => ({
+  runClaudeCode: vi.fn(async () => ({
+    stdout: 'task completed successfully',
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  })),
+  runShellReadOnly: vi.fn(async (command: string) => ({
+    stdout: `output of: ${command}`,
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  })),
+  buildSafeEnv: vi.fn(() => ({})),
 }));
 
 // ─── Test Data ──────────────────────────────────────────────
@@ -65,6 +81,10 @@ const mockTask: Task = {
   override_skip_gate: 0,
   source_channel: null,
   source_chat_id: null,
+  source_message_id: null,
+  complexity: null,
+  timeout_sec: null,
+  delivery_content: null,
   context_chain: null,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
@@ -78,49 +98,11 @@ const mockLLMResponse: LLMResponse = {
   stop_reason: 'end_turn',
 };
 
-// ─── Mock Armory ───────────────────────────────────────────
-
-function createMockArmory(): Armory {
-  const armory = new Armory('/project');
-
-  // Override methods with mocks
-  const engineerTools: LLMTool[] = [
-    { name: 'file_read', description: 'Read', input_schema: { type: 'object', properties: {}, required: [] } },
-    { name: 'file_write', description: 'Write', input_schema: { type: 'object', properties: {}, required: [] } },
-    { name: 'file_list', description: 'List', input_schema: { type: 'object', properties: {}, required: [] } },
-    { name: 'code_execute', description: 'Exec', input_schema: { type: 'object', properties: {}, required: [] } },
-  ];
-
-  vi.spyOn(armory, 'getToolsForRole').mockImplementation((role: AgentRole) => {
-    if (role === 'engineer') return engineerTools;
-    if (role === 'chief_of_staff') return engineerTools.slice(0, 1); // just file_read
-    return []; // adjutant, operations
-  });
-
-  vi.spyOn(armory, 'getToolNamesForRole').mockImplementation((role: AgentRole) => {
-    if (role === 'engineer') return ['file_read', 'file_write', 'file_list', 'code_execute'];
-    if (role === 'chief_of_staff') return ['file_read'];
-    return [];
-  });
-
-  vi.spyOn(armory, 'execute').mockImplementation(async (block) => ({
-    type: 'tool_result',
-    tool_use_id: block.id,
-    content: 'mock tool result',
-    is_error: false,
-  }));
-
-  vi.spyOn(armory, 'getProjectDir').mockReturnValue('/project');
-
-  return armory;
-}
-
 // ─── Tests ──────────────────────────────────────────────────
 
 describe('AgentRunner', () => {
   let llm: LLMClient;
   let costTracker: CostTracker;
-  let armory: Armory;
   let runner: AgentRunner;
 
   beforeEach(() => {
@@ -134,8 +116,7 @@ describe('AgentRunner', () => {
       return fn();
     });
 
-    armory = createMockArmory();
-    runner = new AgentRunner(llm, costTracker, armory);
+    runner = new AgentRunner(llm, costTracker);
   });
 
   describe('runAgent — single call (no tools)', () => {
@@ -150,7 +131,7 @@ describe('AgentRunner', () => {
     });
 
     it('should record agent run in DB', async () => {
-      const { recordAgentRun } = await import('../src/db.js');
+      const { recordAgentRun } = await import('../src/kernel/db.js');
       await runner.runAgent(mockTask, 'adjutant', 'test input');
       expect(recordAgentRun).toHaveBeenCalledTimes(1);
       expect(recordAgentRun).toHaveBeenCalledWith(
@@ -163,7 +144,7 @@ describe('AgentRunner', () => {
     });
 
     it('should update agent run on success', async () => {
-      const { updateAgentRun } = await import('../src/db.js');
+      const { updateAgentRun } = await import('../src/kernel/db.js');
       await runner.runAgent(mockTask, 'adjutant', 'test input');
       expect(updateAgentRun).toHaveBeenCalledWith(
         1,
@@ -176,7 +157,7 @@ describe('AgentRunner', () => {
     });
 
     it('should update agent run on error', async () => {
-      const { updateAgentRun } = await import('../src/db.js');
+      const { updateAgentRun } = await import('../src/kernel/db.js');
       vi.spyOn(costTracker, 'trackCall').mockRejectedValueOnce(new Error('LLM call failed'));
 
       await expect(runner.runAgent(mockTask, 'adjutant', 'test input')).rejects.toThrow('LLM call failed');
@@ -190,7 +171,7 @@ describe('AgentRunner', () => {
     });
 
     it('should write progress logs', async () => {
-      const { writeProgressLog } = await import('../src/db.js');
+      const { writeProgressLog } = await import('../src/kernel/db.js');
       await runner.runAgent(mockTask, 'adjutant', 'test input');
       // Should write start and completion logs
       expect(writeProgressLog).toHaveBeenCalledTimes(2);
@@ -206,52 +187,18 @@ describe('AgentRunner', () => {
     });
   });
 
-  describe('runAgent — agentic loop (with tools)', () => {
-    it('should use agentic loop for engineer role', async () => {
+  describe('runAgent — Claude Code direct (engineer)', () => {
+    it('should spawn Claude Code for engineer role', async () => {
       const result = await runner.runAgent(mockTask, 'engineer', 'build feature X');
-      expect(result).toBe(mockLLMResponse.content);
+      const parsed = JSON.parse(result);
+      expect(parsed.status).toBe('completed');
+      expect(parsed.result).toContain('task completed');
     });
+  });
 
-    it('should call armory.execute for tool calls', async () => {
-      let callCount = 0;
-
-      vi.spyOn(costTracker, 'trackCall').mockImplementation(async (_taskId, _role, fn) => {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            content: 'Let me read the file first.',
-            tool_use: [{
-              type: 'tool_use' as const,
-              id: 'tu-001',
-              name: 'file_read',
-              input: { path: 'src/index.ts' },
-            }],
-            input_tokens: 100,
-            output_tokens: 50,
-            model: 'claude-sonnet-4-20250514',
-            stop_reason: 'tool_use',
-          };
-        }
-        return {
-          content: '{"subtask_id":"sub-001","status":"completed","result":"Done"}',
-          input_tokens: 200,
-          output_tokens: 100,
-          model: 'claude-sonnet-4-20250514',
-          stop_reason: 'end_turn',
-        };
-      });
-
-      const result = await runner.runAgent(mockTask, 'engineer', 'build it');
-      expect(result).toBe('{"subtask_id":"sub-001","status":"completed","result":"Done"}');
-      expect(armory.execute).toHaveBeenCalledTimes(1);
-      expect(armory.execute).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'file_read' }),
-        expect.objectContaining({ taskId: 'task-test001', role: 'engineer' }),
-      );
-    });
-
+  describe('runAgent — agentic loop (chief_of_staff with run tool)', () => {
     it('should accumulate tokens across turns', async () => {
-      const { updateAgentRun } = await import('../src/db.js');
+      const { updateAgentRun } = await import('../src/kernel/db.js');
       let callCount = 0;
 
       vi.spyOn(costTracker, 'trackCall').mockImplementation(async () => {
@@ -259,7 +206,7 @@ describe('AgentRunner', () => {
         if (callCount === 1) {
           return {
             content: '',
-            tool_use: [{ type: 'tool_use' as const, id: 'tu-1', name: 'file_list', input: {} }],
+            tool_use: [{ type: 'tool_use' as const, id: 'tu-1', name: 'run', input: { command: 'ls' } }],
             input_tokens: 50,
             output_tokens: 30,
             model: 'claude-sonnet-4-20250514',
@@ -275,7 +222,7 @@ describe('AgentRunner', () => {
         };
       });
 
-      await runner.runAgent(mockTask, 'engineer', 'do it');
+      await runner.runAgent(mockTask, 'chief_of_staff', 'analyze this');
 
       expect(updateAgentRun).toHaveBeenCalledWith(
         1,
@@ -288,18 +235,18 @@ describe('AgentRunner', () => {
     });
 
     it('should throw and record error when max turns exhausted', async () => {
-      const { updateAgentRun } = await import('../src/db.js');
+      const { updateAgentRun } = await import('../src/kernel/db.js');
 
       vi.spyOn(costTracker, 'trackCall').mockImplementation(async () => ({
         content: 'still working...',
-        tool_use: [{ type: 'tool_use' as const, id: 'tu-loop', name: 'file_list', input: {} }],
+        tool_use: [{ type: 'tool_use' as const, id: 'tu-loop', name: 'run', input: { command: 'ls' } }],
         input_tokens: 10,
         output_tokens: 5,
         model: 'claude-sonnet-4-20250514',
         stop_reason: 'tool_use',
       }));
 
-      await expect(runner.runAgent(mockTask, 'engineer', 'do it')).rejects.toThrow('exhausted');
+      await expect(runner.runAgent(mockTask, 'chief_of_staff', 'analyze')).rejects.toThrow('exhausted');
 
       expect(updateAgentRun).toHaveBeenCalledWith(
         1,
@@ -346,22 +293,5 @@ describe('AgentRunner', () => {
       expect(context).toContain('Test B');
     });
 
-    it('should include available tools from armory for engineer', () => {
-      const context = runner.buildContext(mockTask, 'engineer');
-      expect(context).toContain('Available Tools');
-      expect(context).toContain('file_read');
-      expect(context).toContain('file_write');
-      expect(context).toContain('code_execute');
-    });
-
-    it('should mention iterative usage in tool section', () => {
-      const context = runner.buildContext(mockTask, 'engineer');
-      expect(context).toContain('iteratively');
-    });
-
-    it('should show no tools section for roles without tools', () => {
-      const context = runner.buildContext(mockTask, 'adjutant');
-      expect(context).not.toContain('Available Tools');
-    });
   });
 });

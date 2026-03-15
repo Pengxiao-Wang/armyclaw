@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { CircuitBreaker } from '../src/arsenal/circuit-breaker.js';
+import { CircuitBreaker } from '../src/orchestration/arsenal.js';
 
 describe('CircuitBreaker', () => {
   let breaker: CircuitBreaker;

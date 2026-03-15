@@ -873,11 +873,11 @@ const I18N = {
   stat_week:       { zh: '本周', en: 'THIS WEEK' },
   // Pipeline states
   state_RECEIVED:     { zh: '已接收', en: 'RECEIVED' },
-  state_SPLITTING:    { zh: '拆分中', en: 'SPLITTING' },
   state_PLANNING:     { zh: '规划中', en: 'PLANNING' },
   state_GATE1_REVIEW: { zh: '计划审查', en: 'PLAN REVIEW' },
   state_DISPATCHING:  { zh: '调度中', en: 'DISPATCHING' },
   state_EXECUTING:    { zh: '执行中', en: 'EXECUTING' },
+  state_COLLECTING:   { zh: '整合中', en: 'COLLECTING' },
   state_GATE2_REVIEW: { zh: '结果审查', en: 'RESULT REVIEW' },
   state_DELIVERING:   { zh: '交付中', en: 'DELIVERING' },
   state_DONE:         { zh: '已完成', en: 'DONE' },
@@ -964,8 +964,8 @@ function toggleLang() {
 // ─── Constants ────────────────────────────────────────────
 
 const PIPELINE_STATES = [
-  'RECEIVED', 'SPLITTING', 'PLANNING', 'GATE1_REVIEW',
-  'DISPATCHING', 'EXECUTING', 'GATE2_REVIEW', 'DELIVERING', 'DONE'
+  'RECEIVED', 'PLANNING', 'GATE1_REVIEW',
+  'DISPATCHING', 'EXECUTING', 'COLLECTING', 'GATE2_REVIEW', 'DELIVERING', 'DONE'
 ];
 const ALL_STATES = [...PIPELINE_STATES, 'FAILED', 'CANCELLED', 'PAUSED'];
 
@@ -981,9 +981,9 @@ const ROLE_ICONS = {
 
 // Which agent typically handles which pipeline stage
 const STAGE_AGENT = {
-  RECEIVED: 'adjutant', SPLITTING: 'chief_of_staff', PLANNING: 'chief_of_staff',
+  RECEIVED: 'adjutant', PLANNING: 'chief_of_staff',
   GATE1_REVIEW: 'inspector', DISPATCHING: 'operations', EXECUTING: 'engineer',
-  GATE2_REVIEW: 'inspector', DELIVERING: 'adjutant', DONE: null,
+  COLLECTING: 'operations', GATE2_REVIEW: 'inspector', DELIVERING: 'adjutant', DONE: null,
 };
 
 function stateTagClass(s) {
@@ -1223,7 +1223,7 @@ async function refreshHerald() {
   // Avg durations
   const dur = document.getElementById('herald-durations');
   let dhtml = '';
-  const stateOrder = ['SPLITTING','PLANNING','GATE1_REVIEW','DISPATCHING','EXECUTING','GATE2_REVIEW','DELIVERING'];
+  const stateOrder = ['PLANNING','GATE1_REVIEW','DISPATCHING','EXECUTING','COLLECTING','GATE2_REVIEW','DELIVERING'];
   for (const st of stateOrder) {
     const ms = (d.avg_duration_by_state || {})[st];
     if (ms != null) {

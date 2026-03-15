@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
-import { ChannelRegistry } from '../src/channels/registry.js';
-import { LarkChannel, decryptEvent, addReaction, removeReaction, larkRequest } from '../src/channels/lark.js';
+import { ChannelRegistry } from '../src/kernel/channels/registry.js';
+import { LarkChannel, decryptEvent, addReaction, removeReaction, larkRequest } from '../src/kernel/channels/lark.js';
 import type { InboundMessage, OnInboundMessage } from '../src/types.js';
 import crypto from 'crypto';
 
@@ -516,7 +516,7 @@ describe('LarkChannel — reactions', () => {
     const handler = vi.fn();
     channel.setInboundHandler(handler);
 
-    const larkRequestModule = await import('../src/channels/lark.js');
+    const larkRequestModule = await import('../src/kernel/channels/lark.js');
     const spy = vi.spyOn(larkRequestModule, 'larkRequest').mockRejectedValue(new Error('network error'));
 
     channel.parseMessageEvent({

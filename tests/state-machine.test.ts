@@ -5,13 +5,13 @@ import {
   transition,
   routeReject,
   routeRejectByLevel,
-} from '../src/herald/state-machine.js';
+} from '../src/orchestration/herald/state-machine.js';
 import {
   _initTestDatabase,
   createTask,
   getTaskById,
   getFlowLog,
-} from '../src/db.js';
+} from '../src/kernel/db.js';
 import { TaskState, RejectLevel, AgentRole, TaskPriority } from '../src/types.js';
 
 function makeTask(id: string, state: TaskState = TaskState.RECEIVED) {
@@ -39,23 +39,26 @@ beforeEach(() => {
 
 describe('canTransition', () => {
   it('should allow valid forward transitions', () => {
-    expect(canTransition(TaskState.RECEIVED, TaskState.SPLITTING)).toBe(true);
-    expect(canTransition(TaskState.SPLITTING, TaskState.PLANNING)).toBe(true);
-    expect(canTransition(TaskState.SPLITTING, TaskState.DISPATCHING)).toBe(true);
+    expect(canTransition(TaskState.RECEIVED, TaskState.PLANNING)).toBe(true);
+    expect(canTransition(TaskState.RECEIVED, TaskState.DONE)).toBe(true);
+    expect(canTransition(TaskState.RECEIVED, TaskState.EXECUTING)).toBe(true);
     expect(canTransition(TaskState.PLANNING, TaskState.GATE1_REVIEW)).toBe(true);
     expect(canTransition(TaskState.GATE1_REVIEW, TaskState.DISPATCHING)).toBe(true);
     expect(canTransition(TaskState.DISPATCHING, TaskState.EXECUTING)).toBe(true);
-    expect(canTransition(TaskState.EXECUTING, TaskState.GATE2_REVIEW)).toBe(true);
+    expect(canTransition(TaskState.EXECUTING, TaskState.COLLECTING)).toBe(true);
+    expect(canTransition(TaskState.EXECUTING, TaskState.DONE)).toBe(true);
+    expect(canTransition(TaskState.COLLECTING, TaskState.GATE2_REVIEW)).toBe(true);
     expect(canTransition(TaskState.GATE2_REVIEW, TaskState.DELIVERING)).toBe(true);
     expect(canTransition(TaskState.DELIVERING, TaskState.DONE)).toBe(true);
   });
 
   it('should allow FAILED transitions', () => {
-    expect(canTransition(TaskState.SPLITTING, TaskState.FAILED)).toBe(true);
+    expect(canTransition(TaskState.RECEIVED, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.PLANNING, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.GATE1_REVIEW, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.DISPATCHING, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.EXECUTING, TaskState.FAILED)).toBe(true);
+    expect(canTransition(TaskState.COLLECTING, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.GATE2_REVIEW, TaskState.FAILED)).toBe(true);
     expect(canTransition(TaskState.DELIVERING, TaskState.FAILED)).toBe(true);
   });
@@ -65,8 +68,8 @@ describe('canTransition', () => {
   });
 
   it('should reject invalid transitions', () => {
-    expect(canTransition(TaskState.RECEIVED, TaskState.DONE)).toBe(false);
-    expect(canTransition(TaskState.RECEIVED, TaskState.EXECUTING)).toBe(false);
+    expect(canTransition(TaskState.RECEIVED, TaskState.DELIVERING)).toBe(false);
+    expect(canTransition(TaskState.RECEIVED, TaskState.GATE2_REVIEW)).toBe(false);
     expect(canTransition(TaskState.DONE, TaskState.RECEIVED)).toBe(false);
     expect(canTransition(TaskState.CANCELLED, TaskState.RECEIVED)).toBe(false);
   });
@@ -82,9 +85,9 @@ describe('canTransition', () => {
 
   it('should allow PAUSED from any non-terminal state', () => {
     expect(canTransition(TaskState.RECEIVED, TaskState.PAUSED)).toBe(true);
-    expect(canTransition(TaskState.SPLITTING, TaskState.PAUSED)).toBe(true);
     expect(canTransition(TaskState.PLANNING, TaskState.PAUSED)).toBe(true);
     expect(canTransition(TaskState.EXECUTING, TaskState.PAUSED)).toBe(true);
+    expect(canTransition(TaskState.COLLECTING, TaskState.PAUSED)).toBe(true);
     expect(canTransition(TaskState.DELIVERING, TaskState.PAUSED)).toBe(true);
   });
 
@@ -111,17 +114,18 @@ describe('canTransition', () => {
 
   it('should allow resume from PAUSED', () => {
     expect(canTransition(TaskState.PAUSED, TaskState.RECEIVED)).toBe(true);
-    expect(canTransition(TaskState.PAUSED, TaskState.SPLITTING)).toBe(true);
     expect(canTransition(TaskState.PAUSED, TaskState.PLANNING)).toBe(true);
     expect(canTransition(TaskState.PAUSED, TaskState.DISPATCHING)).toBe(true);
     expect(canTransition(TaskState.PAUSED, TaskState.EXECUTING)).toBe(true);
+    expect(canTransition(TaskState.PAUSED, TaskState.COLLECTING)).toBe(true);
   });
 });
 
 describe('getValidNextStates', () => {
   it('should return correct next states for RECEIVED', () => {
     const states = getValidNextStates(TaskState.RECEIVED);
-    expect(states).toContain(TaskState.SPLITTING);
+    expect(states).toContain(TaskState.PLANNING);
+    expect(states).toContain(TaskState.DONE);
     expect(states).toContain(TaskState.PAUSED);
     expect(states).toContain(TaskState.CANCELLED);
   });
@@ -148,15 +152,15 @@ describe('transition', () => {
   it('should transition and write flow_log', () => {
     makeTask('task-1', TaskState.RECEIVED);
 
-    transition('task-1', TaskState.SPLITTING, AgentRole.ADJUTANT, 'starting');
+    transition('task-1', TaskState.PLANNING, AgentRole.ADJUTANT, 'starting');
 
     const task = getTaskById('task-1')!;
-    expect(task.state).toBe('SPLITTING');
+    expect(task.state).toBe('PLANNING');
 
     const logs = getFlowLog('task-1');
     const lastLog = logs[logs.length - 1];
     expect(lastLog.from_state).toBe('RECEIVED');
-    expect(lastLog.to_state).toBe('SPLITTING');
+    expect(lastLog.to_state).toBe('PLANNING');
     expect(lastLog.agent_role).toBe('adjutant');
     expect(lastLog.reason).toBe('starting');
   });
@@ -164,11 +168,11 @@ describe('transition', () => {
   it('should throw on invalid transition', () => {
     makeTask('task-1', TaskState.RECEIVED);
 
-    expect(() => transition('task-1', TaskState.DONE)).toThrow('Invalid transition');
+    expect(() => transition('task-1', TaskState.DELIVERING)).toThrow('Invalid transition');
   });
 
   it('should throw on missing task', () => {
-    expect(() => transition('nope', TaskState.SPLITTING)).toThrow('Task not found');
+    expect(() => transition('nope', TaskState.PLANNING)).toThrow('Task not found');
   });
 
   it('should allow pausing a running task', () => {
@@ -236,7 +240,7 @@ describe('routeReject — circuit breaker', () => {
     });
 
     const target = routeReject('task-1', RejectLevel.TACTICAL);
-    expect(target).toBe(TaskState.PLANNING); // escalated to strategic → PLANNING
+    expect(target).toBe(TaskState.PLANNING); // escalated to strategic -> PLANNING
   });
 
   it('should escalate strategic to critical after threshold', () => {
@@ -250,22 +254,22 @@ describe('routeReject — circuit breaker', () => {
     });
 
     const target = routeReject('task-1', RejectLevel.STRATEGIC);
-    expect(target).toBe(TaskState.FAILED); // escalated to critical → FAILED
+    expect(target).toBe(TaskState.FAILED); // escalated to critical -> FAILED
   });
 
-  it('should double-escalate tactical → strategic → critical', () => {
+  it('should double-escalate tactical -> strategic -> critical', () => {
     createTask({
       id: 'task-1', parent_id: null, campaign_id: null,
       state: TaskState.GATE2_REVIEW, description: 'Test', priority: TaskPriority.MEDIUM,
       assigned_agent: null, assigned_engineer_id: null, intent_type: null,
       reject_count_tactical: 2,
-      reject_count_strategic: 1,  // tactical→strategic escalation also increments strategic count
+      reject_count_strategic: 1,  // tactical->strategic escalation also increments strategic count
       rubric: null, artifacts_path: null, override_skip_gate: 0,
     });
 
     const target = routeReject('task-1', RejectLevel.TACTICAL);
-    // tactical count 2→3 >= threshold(3) → escalates to strategic
-    // strategic count 1→2 >= threshold(2) → escalates to critical → FAILED
+    // tactical count 2->3 >= threshold(3) -> escalates to strategic
+    // strategic count 1->2 >= threshold(2) -> escalates to critical -> FAILED
     expect(target).toBe(TaskState.FAILED);
   });
 

@@ -3,8 +3,8 @@ import {
   routeTask,
   matchTemplate,
   shouldSkipPlanning,
-} from '../src/herald/router.js';
-import { routeRejectByLevel } from '../src/herald/state-machine.js';
+} from '../src/orchestration/herald/router.js';
+import { routeRejectByLevel } from '../src/orchestration/herald/state-machine.js';
 import { TaskState, AgentRole, RejectLevel, TaskPriority } from '../src/types.js';
 import type { Task, TaskTemplate } from '../src/types.js';
 
@@ -27,6 +27,8 @@ function makeTask(state: TaskState, description = 'Test task'): Task {
     override_skip_gate: 0,
     source_channel: null,
     source_chat_id: null,
+    source_message_id: null,
+    delivery_content: null,
     context_chain: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -65,10 +67,6 @@ describe('routeTask', () => {
     expect(routeTask(makeTask(TaskState.RECEIVED))).toBe(AgentRole.ADJUTANT);
   });
 
-  it('should route SPLITTING to adjutant', () => {
-    expect(routeTask(makeTask(TaskState.SPLITTING))).toBe(AgentRole.ADJUTANT);
-  });
-
   it('should route PLANNING to chief_of_staff', () => {
     expect(routeTask(makeTask(TaskState.PLANNING))).toBe(AgentRole.CHIEF_OF_STAFF);
   });
@@ -83,6 +81,10 @@ describe('routeTask', () => {
 
   it('should route EXECUTING to engineer', () => {
     expect(routeTask(makeTask(TaskState.EXECUTING))).toBe(AgentRole.ENGINEER);
+  });
+
+  it('should route COLLECTING to operations', () => {
+    expect(routeTask(makeTask(TaskState.COLLECTING))).toBe(AgentRole.OPERATIONS);
   });
 
   it('should route GATE2_REVIEW to inspector', () => {
@@ -146,7 +148,6 @@ describe('matchTemplate', () => {
   });
 
   it('should return first matching template', () => {
-    // Both "refactor" would match if description contains "refactor", test order
     const result = matchTemplate('deploy to production now', TEMPLATES);
     expect(result!.id).toBe('tmpl-deploy');
   });
@@ -180,17 +181,17 @@ describe('matchTemplate', () => {
 
 describe('shouldSkipPlanning', () => {
   it('should return true for templates with skip_planning=true', () => {
-    const task = makeTask(TaskState.SPLITTING, 'deploy to production');
+    const task = makeTask(TaskState.RECEIVED, 'deploy to production');
     expect(shouldSkipPlanning(task, TEMPLATES)).toBe(true);
   });
 
   it('should return false for templates with skip_planning=false', () => {
-    const task = makeTask(TaskState.SPLITTING, 'refactor the auth module');
+    const task = makeTask(TaskState.RECEIVED, 'refactor the auth module');
     expect(shouldSkipPlanning(task, TEMPLATES)).toBe(false);
   });
 
   it('should return false when no template matches', () => {
-    const task = makeTask(TaskState.SPLITTING, 'write a poem');
+    const task = makeTask(TaskState.RECEIVED, 'write a poem');
     expect(shouldSkipPlanning(task, TEMPLATES)).toBe(false);
   });
 });

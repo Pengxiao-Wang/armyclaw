@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TaskQueue, QueuePriority } from '../src/herald/queue.js';
+import { TaskQueue, QueuePriority } from '../src/orchestration/herald/queue.js';
 
 let queue: TaskQueue;
 

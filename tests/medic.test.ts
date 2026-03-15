@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // Mock DB functions
-vi.mock('../src/db.js', () => ({
+vi.mock('../src/kernel/db.js', () => ({
   getActiveRuns: vi.fn(() => []),
   getRecentRunsForTask: vi.fn(() => []),
   getTaskById: vi.fn(),
@@ -19,8 +19,8 @@ vi.mock('../src/logger.js', () => ({
   },
 }));
 
-import { Medic } from '../src/medic/self-repair.js';
-import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, updateTaskState, writeFlowLog } from '../src/db.js';
+import { Medic } from '../src/orchestration/medic.js';
+import { getActiveRuns, getRecentRunsForTask, getTaskById, updateTask, updateTaskState, writeFlowLog } from '../src/kernel/db.js';
 import type { AgentRun, Task } from '../src/types.js';
 
 function makeRun(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -60,6 +60,10 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     override_skip_gate: 0,
     source_channel: null,
     source_chat_id: null,
+    source_message_id: null,
+    complexity: null,
+    timeout_sec: null,
+    delivery_content: null,
     context_chain: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -82,23 +86,37 @@ describe('Medic', () => {
   });
 
   describe('stall detection', () => {
-    it('detects stalled tasks (updated_at > STALL_THRESHOLD_MS ago)', async () => {
-      const stalledTime = new Date(Date.now() - 300_000).toISOString(); // 5 min ago
-      const stalledRun = makeRun({ updated_at: stalledTime });
+    it('detects stalled non-engineer tasks (LLM API call timeout)', async () => {
+      const stalledTime = new Date(Date.now() - 200_000).toISOString(); // 200s ago (exceeds default 120s)
+      const stalledRun = makeRun({ agent_role: 'chief_of_staff', updated_at: stalledTime });
       vi.mocked(getActiveRuns).mockReturnValue([stalledRun]);
       vi.mocked(getRecentRunsForTask).mockReturnValue([stalledRun]);
+      vi.mocked(getTaskById).mockReturnValue(makeTask({ assigned_agent: 'chief_of_staff', state: 'PLANNING' }));
+
+      await medic.scan();
+
+      expect(writeFlowLog).toHaveBeenCalled();
+    });
+
+    it('skips engineer stall detection (process runner handles it)', async () => {
+      const stalledTime = new Date(Date.now() - 700_000).toISOString(); // 11+ min ago
+      const stalledRun = makeRun({ agent_role: 'engineer', updated_at: stalledTime });
+      vi.mocked(getActiveRuns).mockReturnValue([stalledRun]);
+      vi.mocked(getRecentRunsForTask).mockReturnValue([]); // no finished runs = no consecutive failures
       vi.mocked(getTaskById).mockReturnValue(makeTask());
 
       await medic.scan();
 
-      // Should have attempted recovery (writeFlowLog or updateTaskState called)
-      expect(writeFlowLog).toHaveBeenCalled();
+      // No stall recovery — process runner owns engineer timeout
+      expect(writeFlowLog).not.toHaveBeenCalled();
+      expect(updateTaskState).not.toHaveBeenCalled();
     });
 
     it('does not flag fresh tasks as stalled', async () => {
       vi.mocked(getActiveRuns).mockReturnValue([
-        makeRun({ updated_at: new Date().toISOString() }),
+        makeRun({ agent_role: 'operations', updated_at: new Date().toISOString() }),
       ]);
+      vi.mocked(getTaskById).mockReturnValue(makeTask({ assigned_agent: 'operations' }));
 
       await medic.scan();
 

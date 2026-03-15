@@ -26,7 +26,7 @@ import {
   updateCampaignPhase,
   getAllCampaigns,
   getTasksByCampaign,
-} from '../src/db.js';
+} from '../src/kernel/db.js';
 import { TaskState, AgentRole, TaskPriority } from '../src/types.js';
 import type { AgentConfig } from '../src/types.js';
 
@@ -110,21 +110,21 @@ describe('Tasks CRUD', () => {
       rubric: null, artifacts_path: null, override_skip_gate: 0,
     });
 
-    updateTaskState('task-1', TaskState.SPLITTING, AgentRole.ADJUTANT, 'splitting');
+    updateTaskState('task-1', TaskState.PLANNING, AgentRole.ADJUTANT, 'planning');
 
     const task = getTaskById('task-1')!;
-    expect(task.state).toBe('SPLITTING');
+    expect(task.state).toBe('PLANNING');
 
     const logs = getFlowLog('task-1');
     // 2 entries: creation + state update
     expect(logs).toHaveLength(2);
     expect(logs[1].from_state).toBe('RECEIVED');
-    expect(logs[1].to_state).toBe('SPLITTING');
+    expect(logs[1].to_state).toBe('PLANNING');
     expect(logs[1].agent_role).toBe('adjutant');
   });
 
   it('should throw when updating non-existent task', () => {
-    expect(() => updateTaskState('nope', TaskState.SPLITTING)).toThrow('Task not found');
+    expect(() => updateTaskState('nope', TaskState.PLANNING)).toThrow('Task not found');
   });
 
   it('should update task fields', () => {
@@ -181,7 +181,7 @@ describe('Flow Log', () => {
       task_id: 'task-1',
       at: new Date().toISOString(),
       from_state: TaskState.RECEIVED,
-      to_state: TaskState.SPLITTING,
+      to_state: TaskState.PLANNING,
       agent_role: AgentRole.ADJUTANT,
       reason: 'manual test',
       duration_ms: 100,
@@ -191,7 +191,7 @@ describe('Flow Log', () => {
     // 1 from creation + 1 manual
     expect(logs).toHaveLength(2);
     expect(logs[1].from_state).toBe('RECEIVED');
-    expect(logs[1].to_state).toBe('SPLITTING');
+    expect(logs[1].to_state).toBe('PLANNING');
     expect(logs[1].duration_ms).toBe(100);
   });
 });
