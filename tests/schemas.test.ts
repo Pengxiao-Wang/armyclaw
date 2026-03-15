@@ -6,7 +6,7 @@ import {
   OperationsOutputSchema,
   EngineerOutputSchema,
   parseAgentOutput,
-} from '../src/agents/schemas.js';
+} from '../src/orchestration/agents/schemas.js';
 
 describe('AdjutantOutputSchema', () => {
   it('should validate correct adjutant output', () => {
@@ -48,10 +48,11 @@ describe('ChiefOfStaffOutputSchema', () => {
       plan: {
         goal: 'Build feature',
         steps: [
-          { id: 's1', description: 'Design API', depends_on: [] },
-          { id: 's2', description: 'Implement', depends_on: ['s1'] },
+          { id: 's1', description: 'Design API', estimated_duration_sec: 300, complexity: 'moderate', depends_on: [] },
+          { id: 's2', description: 'Implement', estimated_duration_sec: 600, complexity: 'moderate', depends_on: ['s1'] },
         ],
         estimated_tokens: 10000,
+        estimated_duration_sec: 900,
         complexity: 'moderate',
       },
     };
@@ -80,7 +81,7 @@ describe('ChiefOfStaffOutputSchema', () => {
     const invalid = {
       type: 'execution',
       plan: {
-        goal: 'x', steps: [], estimated_tokens: 100, complexity: 'extreme',
+        goal: 'x', steps: [], estimated_tokens: 100, estimated_duration_sec: 300, complexity: 'extreme',
       },
     };
     expect(() => ChiefOfStaffOutputSchema.parse(invalid)).toThrow();

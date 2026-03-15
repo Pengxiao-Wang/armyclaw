@@ -6,11 +6,11 @@
 
 export const TaskState = {
   RECEIVED: 'RECEIVED',
-  SPLITTING: 'SPLITTING',
   PLANNING: 'PLANNING',
   GATE1_REVIEW: 'GATE1_REVIEW',
   DISPATCHING: 'DISPATCHING',
   EXECUTING: 'EXECUTING',
+  COLLECTING: 'COLLECTING',
   GATE2_REVIEW: 'GATE2_REVIEW',
   DELIVERING: 'DELIVERING',
   DONE: 'DONE',
@@ -89,6 +89,8 @@ export interface Task {
   source_chat_id: string | null;
   source_message_id: string | null;
   complexity: 'simple' | 'moderate' | 'complex' | null;
+  timeout_sec: number | null;
+  delivery_content: string | null;
   context_chain: string | null;
   created_at: string;
   updated_at: string;
@@ -178,8 +180,9 @@ export interface ChiefOfStaffOutput {
   answer?: string;
   plan?: {
     goal: string;
-    steps: { id: string; description: string; depends_on?: string[] }[];
+    steps: { id: string; description: string; estimated_duration_sec: number; complexity: 'simple' | 'moderate' | 'complex'; depends_on?: string[] }[];
     estimated_tokens: number;
+    estimated_duration_sec: number;
     complexity: 'simple' | 'moderate' | 'complex';
   };
   campaign?: {
@@ -316,4 +319,96 @@ export interface StateTransition {
   to: TaskState;
   agent?: AgentRole;
   condition?: string;
+}
+
+// --- Observability Types ---
+
+export type ObserverEvent =
+  | { type: 'agent_start'; role: AgentRole; model: string }
+  | { type: 'llm_request'; model: string; messageCount: number }
+  | { type: 'llm_response'; model: string; durationMs: number; success: boolean; error?: string }
+  | { type: 'tool_call'; tool: string; durationMs: number; success: boolean }
+  | { type: 'task_transition'; taskId: string; from: string; to: string }
+  | { type: 'heartbeat_tick' }
+  | { type: 'error'; component: string; message: string };
+
+export type ObserverMetric =
+  | { type: 'request_latency'; ms: number }
+  | { type: 'tokens_used'; count: number }
+  | { type: 'active_tasks'; count: number }
+  | { type: 'queue_depth'; count: number };
+
+export interface Observer {
+  recordEvent(event: ObserverEvent): void;
+  recordMetric(metric: ObserverMetric): void;
+  flush(): void;
+  name: string;
+}
+
+export interface HealthStatus {
+  hq: 'ok' | 'degraded' | 'down';
+  db: 'ok' | 'unreachable';
+  llm: 'ok' | 'circuit_open' | 'unreachable';
+  activeAgents: number;
+  stalledTasks: number;
+  dailyCostUsd: number;
+  uptimeMs: number;
+  checkedAt: string;
+}
+
+// --- Memory / Archivist Types ---
+
+export interface MemoryDocument {
+  id: string;
+  source: 'task_result' | 'task_failure' | 'inspector_reject' | 'context_archive' | 'user_preference';
+  path: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryChunk {
+  id: string;
+  document_id: string;
+  chunk_index: number;
+  content: string;
+  embedding: Buffer | null;
+}
+
+export interface SearchResult {
+  document_id: string;
+  document_path: string;
+  chunk_id: string;
+  content: string;
+  score: number;
+}
+
+// --- Leak Detection Types ---
+
+export const LeakAction = {
+  BLOCK: 'block',
+  REDACT: 'redact',
+  WARN: 'warn',
+} as const;
+export type LeakAction = (typeof LeakAction)[keyof typeof LeakAction];
+
+export const LeakSeverity = {
+  LOW: 'low',
+  MEDIUM: 'medium',
+  HIGH: 'high',
+  CRITICAL: 'critical',
+} as const;
+export type LeakSeverity = (typeof LeakSeverity)[keyof typeof LeakSeverity];
+
+export interface LeakMatch {
+  pattern: string;
+  severity: LeakSeverity;
+  action: LeakAction;
+  location: { start: number; end: number };
+}
+
+export interface LeakScanResult {
+  matches: LeakMatch[];
+  shouldBlock: boolean;
+  redactedContent: string | null;
 }

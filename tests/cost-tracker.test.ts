@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock the db module before importing CostTracker
-vi.mock('../src/db.js', () => ({
+vi.mock('../src/kernel/db.js', () => ({
   recordCost: vi.fn(),
   getDailyCost: vi.fn(() => 0),
 }));
@@ -15,8 +15,8 @@ vi.mock('../src/logger.js', () => ({
   },
 }));
 
-import { CostTracker } from '../src/depot/cost-tracker.js';
-import { recordCost, getDailyCost } from '../src/db.js';
+import { CostTracker } from '../src/orchestration/depot.js';
+import { recordCost, getDailyCost } from '../src/kernel/db.js';
 import type { LLMResponse, AgentRole } from '../src/types.js';
 
 describe('CostTracker', () => {

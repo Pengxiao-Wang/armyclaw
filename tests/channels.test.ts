@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ChannelRegistry } from '../src/channels/registry.js';
-import { LarkChannel } from '../src/channels/lark.js';
+import { ChannelRegistry } from '../src/kernel/channels/registry.js';
+import { LarkChannel } from '../src/kernel/channels/lark.js';
 import type { Channel, InboundMessage } from '../src/types.js';
 
 // ─── Mocks ──────────────────────────────────────────────────
